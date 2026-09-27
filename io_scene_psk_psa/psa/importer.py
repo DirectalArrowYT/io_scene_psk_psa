@@ -113,6 +113,9 @@ class PsaImportResult:
         self.warnings: list[str] = []
 
 
+_bone_name_lookup_cache: dict = {}
+
+
 def _get_armature_bone_index_for_psa_bone(psa_bone_name: str, armature_bone_names: list[str], bone_mapping: BoneMapping) -> int | None:
     """
     @param psa_bone_name: The name of the PSA bone.
@@ -120,6 +123,25 @@ def _get_armature_bone_index_for_psa_bone(psa_bone_name: str, armature_bone_name
     @param bone_mapping: Bone mapping information.
     @return: The index of the armature bone that corresponds to the given PSA bone, or None if no such bone exists.
     """
+    if re.escape(psa_bone_name.rstrip()) == psa_bone_name.rstrip():
+        # Fast path: the name has no special characters, so the regular expression below is equivalent to comparing
+        # the names (ignoring trailing whitespace & case, depending on the bone mapping options).
+        def normalize(name: str) -> str:
+            if bone_mapping.should_ignore_trailing_whitespace:
+                name = name.rstrip()
+            return name if bone_mapping.is_case_sensitive else name.lower()
+        key = (id(armature_bone_names), bone_mapping.is_case_sensitive, bone_mapping.should_ignore_trailing_whitespace)
+        lookup = _bone_name_lookup_cache.get(key)
+        if lookup is None or lookup[0] is not armature_bone_names:
+            names: dict[str, int] = {}
+            for index, name in enumerate(armature_bone_names):
+                names.setdefault(normalize(name), index)
+            lookup = (armature_bone_names, names)
+            _bone_name_lookup_cache.clear()
+            _bone_name_lookup_cache[key] = lookup
+        name = psa_bone_name.rstrip() if bone_mapping.should_ignore_trailing_whitespace else psa_bone_name
+        return lookup[1].get(name if bone_mapping.is_case_sensitive else name.lower())
+
     # Use regular expressions for bone name matching.
     pattern = psa_bone_name
     flags = 0
@@ -190,6 +212,31 @@ def _resample_sequence_data_matrix(sequence_data_matrix: np.ndarray, frame_step:
     return resampled_sequence_data_matrix
 
 
+def _read_sequence_data_matrix_fast(psa_reader: PsaReader, sequence_name: str) -> np.ndarray:
+    """
+    Reads the sequence data matrix directly from the file with numpy (much faster than reading each key).
+    The key layout is (Lx, Ly, Lz, Qx, Qy, Qz, Qw, Time) and the scale key layout is (Sx, Sy, Sz, Time).
+    """
+    sequence = psa_reader.sequences[sequence_name]
+    bone_count = len(psa_reader.bones)
+    count = sequence.frame_count * bone_count
+    fp = psa_reader._fp
+    fp.seek(psa_reader._keys_data_offset + sequence.frame_start_index * bone_count * 32, 0)
+    keys = np.frombuffer(fp.read(count * 32), dtype='<f4', count=count * 8).reshape(sequence.frame_count, bone_count, 8)
+    matrix = np.ones((sequence.frame_count, bone_count, 10))
+    matrix[:, :, 0] = keys[:, :, 6]
+    matrix[:, :, 1:4] = keys[:, :, 3:6]
+    matrix[:, :, 4:7] = keys[:, :, 0:3]
+    scale_keys_offset = psa_reader._scale_keys_data_offset
+    if scale_keys_offset is not None:
+        fp.seek(scale_keys_offset + sequence.frame_start_index * bone_count * 16, 0)
+        data = fp.read(count * 16)
+        if len(data) == count * 16:
+            scale_keys = np.frombuffer(data, dtype='<f4', count=count * 4).reshape(sequence.frame_count, bone_count, 4)
+            matrix[:, :, 7:10] = scale_keys[:, :, 0:3]
+    return matrix
+
+
 def _read_sequence_data_matrix(psa_reader: PsaReader, sequence_name: str) -> np.ndarray:
     """
     Reads and returns the data matrix for the given sequence.
@@ -198,6 +245,11 @@ def _read_sequence_data_matrix(psa_reader: PsaReader, sequence_name: str) -> np.
     @param sequence_name: The name of the sequence.
     @return: An FxBx10 matrix where F is the number of frames, B is the number of bones.
     """
+    try:
+        return _read_sequence_data_matrix_fast(psa_reader, sequence_name)
+    except (AttributeError, ValueError, OSError):
+        # Fall back to the (slow) generic reader.
+        pass
     sequence = psa_reader.sequences[sequence_name]
     keys = psa_reader.read_sequence_keys(sequence_name)
     bone_count = len(psa_reader.bones)

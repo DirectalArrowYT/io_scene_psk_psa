@@ -30,6 +30,7 @@ def get_psk_import_options_from_properties(property_group: PskImportMixin):
     options.rig_options.use_fingers = property_group.rig_use_fingers
     options.rig_options.use_eyes = property_group.rig_use_eyes
     options.rig_options.use_face = property_group.rig_use_face
+    options.rig_options.eye_style = property_group.rig_eye_style
     options.should_setup_material_textures = property_group.should_setup_material_textures
     options.texture_search_directory = property_group.texture_search_directory
 
@@ -96,6 +97,8 @@ def psk_import_draw(layout: UILayout, props: PskImportMixin):
             col.prop(props, 'rig_use_leg_ik')
             col.prop(props, 'rig_use_fingers')
             col.prop(props, 'rig_use_eyes')
+            if props.rig_use_eyes:
+                col.prop(props, 'rig_eye_style')
             col.prop(props, 'rig_use_face')
 
     transform_header, transform_panel = layout.panel('transform_panel_id', default_closed=False)

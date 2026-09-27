@@ -22,6 +22,7 @@ class PskImportMixin:
     rig_use_fingers: bool
     rig_use_eyes: bool
     rig_use_face: bool
+    rig_eye_style: str
     should_setup_material_textures: bool
     texture_search_directory: str
     bdk_repository_id: str

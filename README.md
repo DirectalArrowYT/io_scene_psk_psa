@@ -54,10 +54,12 @@ Tick **Animate Ready** when importing a PSK (or use **Make Animate Ready** in th
 | **IK/FK switch** | Per-limb sliders in the `PSK Rig` panel. In FK mode, the deform bones are animated directly. The snap buttons match IK to FK (or vice versa) on the current frame. |
 | **Foot roll** | Per-foot slider. Positive values roll onto the ball of the foot (the heel lifts while the toes bend & stay on the floor), negative values lift the toes. `CTRL-toe` controls the toes. |
 | **Fingers** | Scale `CTRL-fingers` on its Y axis to curl all the fingers (0 = fist, above 1 = open wide) and rotate it on its Z axis to spread the fingers. Each finger also has its own curl control (`CTRL-finger_index`, etc.). |
-| **Eyes** | `CTRL-eyes` (both eyes) and `CTRL-eye` (per eye) aim targets. |
+| **Eyes** | `CTRL-eyes` (both eyes) and `CTRL-eye` (per eye). The **Eye Style** is detected from the shape of the eye meshes: **Slide** for flat irises (common in anime-style games), where moving the controls slides the irises across the face and scaling them changes the size of the irises/pupils, or **Aim** for spherical eyeballs, where the controls are targets that the eyes look at. |
 | **Face** | Controls in front of the face: blink (`CTRL-blink`, move down to close the eyelids, up to open them wide), brows (`CTRL-brow`, move to raise/lower, rotate to tilt), mouth corners (`CTRL-mouth_corner`, smile/frown/wide/narrow), lips (`CTRL-lip_upper`/`CTRL-lip_lower`, move up/down & forward to pout), cheeks (`CTRL-cheek`) and jaw (`CTRL-jaw`, move down to open, sideways to shift). The individual facial bones can also be animated directly. |
 
-The finger, eye aim & face controls are layered on top of the FK animation, so imported animations look exactly the same while the controls are at rest.
+**Face Presets** (`PSK Rig` sidebar tab): a library of facial expressions. Use the import button to select PSA files (e.g., a game's facial animations such as blinks, smiles or mouth shapes); a preset is created from the most expressive frame of each sequence. Presets can also be saved from the current pose of the face. Select a preset and click **Apply** (or **Apply & Key**) to pose the face, with the **Blend** slider controlling how much of the preset is applied. Presets only affect the facial bones, and are also available as pose assets in Blender's Pose Library.
+
+The finger, eye (slide), and face controls are layered on top of the FK animation, so imported animations look exactly the same while the controls are at rest.
 
 **Importing animations onto the rig:** when a PSA is imported onto an armature with the rig, the IK & eye controls are keyed on every frame so that the animation looks exactly as it was authored (**Bake to Rig Controls** import option).
 

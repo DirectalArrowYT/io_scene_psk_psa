@@ -70,6 +70,14 @@ psk_import_components_items = (
     ('ARMATURE', 'Armature Only', 'Import armature only'),
 )
 
+eye_style_items = (
+    ('AUTO', 'Auto', 'Detect the eye style from the shape of the eye meshes'),
+    ('SLIDE', 'Slide', 'Flat irises that slide across the face (common in anime-style games). The eye controls move '
+                       '& scale the irises'),
+    ('AIM', 'Aim', 'Spherical eyeballs that rotate. The eye controls are targets that the eyes look at'),
+)
+
+
 class PskImportMixin:
     should_import_vertex_colors: BoolProperty(
         default=True,
@@ -158,6 +166,7 @@ class PskImportMixin:
     rig_use_leg_ik: BoolProperty(default=True, name='Leg IK', options=set(), description='Add IK controls & a foot roll to the legs')
     rig_use_fingers: BoolProperty(default=True, name='Fingers', options=set(), description='Add hand controls to curl & spread the fingers')
     rig_use_eyes: BoolProperty(default=True, name='Eyes', options=set(), description='Add eye aim target controls')
+    rig_eye_style: EnumProperty(name='Eye Style', items=eye_style_items, default='AUTO', options=set())
     rig_use_face: BoolProperty(default=True, name='Face', options=set(),
                                description='Add facial controls (blink, brows, jaw, mouth corners, lips & cheeks)')
     should_setup_material_textures: BoolProperty(

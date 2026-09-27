@@ -17,6 +17,7 @@ from .bake import (
 )
 from .builder import RigOptions, build_rig, get_rig_info, has_rig, remove_rig
 from .orientation import reorient_armature_bones
+from ..psk.properties import eye_style_items
 
 
 def _get_armature(context: Context) -> Object | None:
@@ -114,6 +115,7 @@ class RigOptionsMixin:
     use_fingers: BoolProperty(name='Finger Controls', default=True,
                               description='Add hand controls to curl & spread the fingers')
     use_eyes: BoolProperty(name='Eye Controls', default=True, description='Add eye aim target controls')
+    eye_style: EnumProperty(name='Eye Style', items=eye_style_items, default='AUTO')
     use_face: BoolProperty(name='Face Controls', default=True,
                            description='Add facial controls (blink, brows, jaw, mouth corners, lips & cheeks)')
 
@@ -124,6 +126,7 @@ class RigOptionsMixin:
         options.use_fingers = self.use_fingers
         options.use_eyes = self.use_eyes
         options.use_face = self.use_face
+        options.eye_style = self.eye_style
         return options
 
     def draw_rig_options(self, layout):
@@ -134,6 +137,8 @@ class RigOptionsMixin:
         col.prop(self, 'use_leg_ik')
         col.prop(self, 'use_fingers')
         col.prop(self, 'use_eyes')
+        if self.use_eyes:
+            col.prop(self, 'eye_style')
         col.prop(self, 'use_face')
 
 

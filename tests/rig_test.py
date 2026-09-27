@@ -8,7 +8,7 @@ from pathlib import Path
 
 import bpy
 import pytest
-from mathutils import Matrix
+from mathutils import Matrix, Vector
 
 from psk_psa_py.psk.reader import read_psk_from_file
 from psk_psa_py.psa.reader import PsaReader
@@ -333,3 +333,71 @@ def test_test_model_full_workflow():
             exported_key = psa.keys[frame * len(exported_names) + export_index]
             assert _quaternion_difference(original_key.rotation, exported_key.rotation) < 1e-2, (frame, name)
             assert max(abs(a - b) for a, b in zip(original_key.location, exported_key.location)) < 5e-2, (frame, name)
+
+
+def test_eye_style_aim_for_eyeballs():
+    armature_object = _import_psk(SARGE_FILEPATH, should_make_animate_ready=True)
+    from io_scene_psk_psa.rig.builder import get_rig_info
+    info = get_rig_info(armature_object)
+    assert info['eye_style'] == 'AIM'
+    assert info['eyes'] is not None
+
+
+@pytest.mark.skipif(not os.path.isdir(TEST_MODEL_DIRECTORY), reason='Test model not available')
+def test_eye_style_slide_for_flat_irises():
+    """The test model has flat irises that slide across the face (the eye bones translate & scale, never rotate)."""
+    psk_filepath = os.path.join(TEST_MODEL_DIRECTORY, 'Mesh', 'SK_pl02_100.psk')
+    armature_object = _import_psk(psk_filepath, should_make_animate_ready=True)
+    from io_scene_psk_psa.rig.builder import get_rig_info
+    assert get_rig_info(armature_object)['eye_style'] == 'SLIDE'
+    pose_bones = armature_object.pose.bones
+    bpy.context.view_layer.update()
+    head = pose_bones['L_eye'].head.copy()
+    rotation = pose_bones['L_eye'].matrix.to_quaternion()
+    pose_bones['CTRL-eye.L'].location = (-1.0, 0.0, 0.5)
+    pose_bones['CTRL-eyes'].scale = (0.5, 0.5, 0.5)
+    bpy.context.view_layer.update()
+    moved = pose_bones['L_eye'].head - head
+    assert abs(moved.length - (1.0 ** 2 + 0.5 ** 2) ** 0.5) < 1e-3
+    assert rotation.rotation_difference(pose_bones['L_eye'].matrix.to_quaternion()).angle < 1e-4
+    assert abs(pose_bones['R_eye'].matrix.to_scale().x - 0.5) < 1e-3
+
+
+@pytest.mark.skipif(not os.path.isdir(TEST_MODEL_DIRECTORY), reason='Test model not available')
+def test_face_presets_from_psa():
+    from io_scene_psk_psa.rig import face_presets
+    psk_filepath = os.path.join(TEST_MODEL_DIRECTORY, 'Mesh', 'SK_pl02_100.psk')
+    armature_object = _import_psk(psk_filepath, should_make_animate_ready=True)
+    directory = os.path.join(TEST_MODEL_DIRECTORY, 'Animations', 'fa')
+    filepaths = [os.path.join(directory, f) for f in ('fa100_FaceEyeClose001.psa', 'AM_FaceLipClose.psa', 'AM_FaceLipLoop.psa')]
+    presets = face_presets.import_face_presets(bpy.context, armature_object, filepaths)
+    names = {p.name for p in presets}
+    assert names == {'Face: fa100_FaceEyeClose001', 'Face: AM_FaceLipClose', 'Face: AM_FaceLipLoop'}
+    assert not any(a.name.startswith('__psk_face_preset_tmp__') for a in bpy.data.actions)
+    face_bones = set(face_presets.get_face_bones(armature_object))
+    for preset in presets:
+        bones = {fc.data_path.split('"')[1] for layer in preset.layers for strip in layer.strips
+                 for cb in strip.channelbags for fc in cb.fcurves}
+        assert bones and bones <= face_bones
+    # Closing the eyes brings the upper & lower lids together.
+    pose_bones = armature_object.pose.bones
+    bpy.context.view_layer.update()
+    gap = pose_bones['LT_eyelid_C'].head.z - pose_bones['LU_eyelid_B'].head.z
+    face_presets.apply_face_preset(armature_object, bpy.data.actions['Face: fa100_FaceEyeClose001'], insert_keys=True)
+    bpy.context.view_layer.update()
+    assert pose_bones['LT_eyelid_C'].head.z - pose_bones['LU_eyelid_B'].head.z < gap * 0.5
+    face_presets.reset_face(armature_object)
+    bpy.context.view_layer.update()
+    assert abs(pose_bones['LT_eyelid_C'].head.z - pose_bones['LU_eyelid_B'].head.z - gap) < 1e-4
+
+
+def test_face_preset_from_pose():
+    from io_scene_psk_psa.rig import face_presets
+    armature_object = _import_psk(SHREK_PSK_FILEPATH, should_make_animate_ready=True)
+    jaw = armature_object.pose.bones['body_jaw_joint']
+    jaw.location = (0.1, 0.2, 0.3)
+    preset = face_presets.face_preset_from_pose(armature_object, 'Test')
+    face_presets.reset_face(armature_object)
+    assert jaw.location.length == 0.0
+    face_presets.apply_face_preset(armature_object, preset, factor=0.5)
+    assert (jaw.location - Vector((0.05, 0.1, 0.15))).length < 1e-5

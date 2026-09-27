@@ -39,6 +39,8 @@ from .rig import (
     bake as rig_bake,
     operators as rig_operators,
     ui as rig_ui,
+    face_presets as rig_face_presets,
+    face_presets_ui as rig_face_presets_ui,
 )
 from .psk import materials as psk_materials
 from .psa.import_ import (
@@ -66,6 +68,8 @@ if _needs_reload:
     importlib.reload(rig_bake)
     importlib.reload(rig_operators)
     importlib.reload(rig_ui)
+    importlib.reload(rig_face_presets)
+    importlib.reload(rig_face_presets_ui)
     importlib.reload(psk_materials)
 
     importlib.reload(psk_builder)
@@ -127,6 +131,7 @@ _modules = (
     psa_file_handlers,
     rig_operators,
     rig_ui,
+    rig_face_presets_ui,
 )
 
 def register():

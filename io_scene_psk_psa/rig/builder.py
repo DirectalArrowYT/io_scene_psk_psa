@@ -64,6 +64,9 @@ class RigOptions:
         self.use_fingers = True
         self.use_eyes = True
         self.use_face = True
+        # One of 'AUTO', 'SLIDE' (flat irises that slide across the face, common in anime-style games) or 'AIM'
+        # (spherical eyeballs that rotate to look at a target).
+        self.eye_style = 'AUTO'
 
 
 class RigBuildResult:
@@ -608,37 +611,45 @@ def build_rig(context: Context, armature_object: Object, options: RigOptions) ->
     # Eyes
     # ------------------------------------------------------------------------------------------------------------
     if options.use_eyes and smap.eyes and smap.head is not None:
-        prop = 'eyes_aim'
         eye_positions = {side: skeleton.head(name) for side, name in smap.eyes.items()}
         center = sum(eye_positions.values(), Vector()) / len(eye_positions)
         eye_separation = (eye_positions['L'] - eye_positions['R']).length if len(eye_positions) == 2 else face_unit * 4
-        distance = max(eye_separation * 4.0, smap.height * 0.1)
+        eye_style = options.eye_style
+        if eye_style == 'AUTO':
+            eye_style = detect_eye_style(armature_object, list(smap.eyes.values()))
+        info['eye_style'] = eye_style
         parent_name = f'{CTRL}eyes'
-        add_spec(name=parent_name, matrix=_matrix(center + forward * distance, forward, z_hint=up),
-                 length=eye_separation * 0.5, parent=smap.head, kind='CTRL', collection=COLLECTION_FACE_CONTROLS,
-                 color=SIDE_COLORS['C'], widget='eyes', widget_scale=Vector((eye_separation * 0.55, 1.0, eye_separation * 0.55)),
-                 lock_scale=(True, True, True))
-        items = []
-        for side, eye in smap.eyes.items():
-            ctrl_name = f'{CTRL}eye{side_suffix(side)}'
-            add_spec(name=ctrl_name, matrix=_matrix(eye_positions[side] + forward * distance, forward, z_hint=up),
-                     length=eye_separation * 0.25, parent=parent_name, kind='CTRL', collection=COLLECTION_FACE_CONTROLS,
-                     color=SIDE_COLORS[side], widget='circle', widget_scale=eye_separation * 0.2,
-                     lock_rotation=(True, True, True), lock_rotation_w=True)
-            items.append({'bone': eye, 'ctrl': ctrl_name})
-        info['eyes'] = {'parent': parent_name, 'items': items, 'prop': prop, 'distance': distance}
-        info['properties'].append(prop)
+        if eye_style == 'SLIDE':
+            _build_sliding_eyes(smap, rest, eye_positions, center, eye_separation, add_spec, constraint_jobs, info,
+                                armature_object, parent_name)
+        else:
+            prop = 'eyes_aim'
+            distance = max(eye_separation * 4.0, smap.height * 0.1)
+            add_spec(name=parent_name, matrix=_matrix(center + forward * distance, forward, z_hint=up),
+                     length=eye_separation * 0.5, parent=smap.head, kind='CTRL', collection=COLLECTION_FACE_CONTROLS,
+                     color=SIDE_COLORS['C'], widget='eyes', widget_scale=Vector((eye_separation * 0.55, 1.0, eye_separation * 0.55)),
+                     lock_scale=(True, True, True))
+            items = []
+            for side, eye in smap.eyes.items():
+                ctrl_name = f'{CTRL}eye{side_suffix(side)}'
+                add_spec(name=ctrl_name, matrix=_matrix(eye_positions[side] + forward * distance, forward, z_hint=up),
+                         length=eye_separation * 0.25, parent=parent_name, kind='CTRL', collection=COLLECTION_FACE_CONTROLS,
+                         color=SIDE_COLORS[side], widget='circle', widget_scale=eye_separation * 0.2,
+                         lock_rotation=(True, True, True), lock_rotation_w=True)
+                items.append({'bone': eye, 'ctrl': ctrl_name})
+            info['eyes'] = {'parent': parent_name, 'items': items, 'prop': prop, 'distance': distance}
+            info['properties'].append(prop)
 
-        def eyes_job(pose, items=items, prop=prop):
-            _ensure_float_property(armature_object, prop, 1.0, 0.0, 1.0, 'Aim the eyes at the eye target controls (1 = aim, 0 = FK)')
-            for item in items:
-                c = typing_cast(bpy.types.DampedTrackConstraint, _new_constraint(pose[item['bone']], 'DAMPED_TRACK', 'Eye Aim'))
-                c.target = armature_object
-                c.subtarget = item['ctrl']
-                c.track_axis = 'TRACK_Y'
-                _add_driver(c, 'influence', armature_object, prop)
-            return None
-        constraint_jobs.append(('eyes', eyes_job))
+            def eyes_job(pose, items=items, prop=prop):
+                _ensure_float_property(armature_object, prop, 1.0, 0.0, 1.0, 'Aim the eyes at the eye target controls (1 = aim, 0 = FK)')
+                for item in items:
+                    c = typing_cast(bpy.types.DampedTrackConstraint, _new_constraint(pose[item['bone']], 'DAMPED_TRACK', 'Eye Aim'))
+                    c.target = armature_object
+                    c.subtarget = item['ctrl']
+                    c.track_axis = 'TRACK_Y'
+                    _add_driver(c, 'influence', armature_object, prop)
+                return None
+            constraint_jobs.append(('eyes', eyes_job))
 
     # ------------------------------------------------------------------------------------------------------------
     # Face
@@ -748,6 +759,89 @@ def build_rig(context: Context, armature_object: Object, options: RigOptions) ->
     bpy.ops.object.mode_set(mode='OBJECT' if previous_mode == 'EDIT' else previous_mode)
     context.view_layer.objects.active = previous_active
     return result
+
+
+def detect_eye_style(armature_object: Object, eye_bones: list[str]) -> str:
+    """
+    Determines how the eyes of a character work from the shape of the mesh that is weighted to the eye bones:
+    flat irises (discs) slide across the face ('SLIDE'), while eyeballs (spheres) rotate ('AIM').
+    """
+    import numpy as np
+    ratios = []
+    for obj in bpy.data.objects:
+        if obj.type != 'MESH' or not any(m.type == 'ARMATURE' and m.object == armature_object for m in obj.modifiers):
+            continue
+        group_indices = {obj.vertex_groups[name].index for name in eye_bones if name in obj.vertex_groups}
+        if not group_indices:
+            continue
+        for index in group_indices:
+            points = [tuple(v.co) for v in obj.data.vertices
+                      if any(g.group == index and g.weight > 0.5 for g in v.groups)]
+            if len(points) < 8:
+                continue
+            extents = np.sqrt(np.maximum(np.linalg.eigvalsh(np.cov(np.array(points).T)), 0.0))
+            if extents[2] > 0.0:
+                ratios.append(extents[0] / extents[2])
+    if not ratios:
+        return 'AIM'
+    # A sphere has a ratio of ~1, a flat disc has a ratio of ~0.
+    return 'SLIDE' if min(ratios) < 0.35 else 'AIM'
+
+
+def _build_sliding_eyes(smap: SkeletonMap, rest: dict, eye_positions: dict, center: Vector, eye_separation: float,
+                        add_spec, constraint_jobs: list, info: dict, armature_object: Object, parent_name: str):
+    """
+    Eye controls for flat irises that slide across the face (instead of rotating). Moving the controls moves the
+    irises and scaling them scales the irises (e.g., small pupils when shocked). Moving/scaling `CTRL-eyes` moves or
+    scales both irises. These controls are additive (layered on top of the FK animation of the eye bones).
+    """
+    up, forward = smap.up, smap.forward
+    front = max((position - center).dot(forward) for position in eye_positions.values()) + eye_separation * 0.35
+    add_spec(name=parent_name, matrix=_matrix(center + forward * front, forward, z_hint=up),
+             length=eye_separation * 0.3, parent=smap.head, kind='CTRL', collection=COLLECTION_FACE_CONTROLS,
+             color=SIDE_COLORS['C'], widget='eyes', widget_scale=Vector((eye_separation * 0.45, 1.0, eye_separation * 0.3)),
+             rotation_mode='XYZ', lock_location=(False, True, False), lock_rotation=(True, True, True),
+             lock_scale=(False, False, False))
+    info['additive_controls'].append(parent_name)
+    control_x = _matrix(Vector(), forward, z_hint=up).col[0].xyz.normalized()
+    items = []
+    for side, eye in smap.eyes.items():
+        ctrl_name = f'{CTRL}eye{side_suffix(side)}'
+        position = eye_positions[side] + forward * (front - (eye_positions[side] - center).dot(forward))
+        add_spec(name=ctrl_name, matrix=_matrix(position, forward, z_hint=up), length=eye_separation * 0.15,
+                 parent=parent_name, kind='CTRL', collection=COLLECTION_FACE_CONTROLS, color=SIDE_COLORS[side],
+                 widget='circle', widget_scale=eye_separation * 0.12, rotation_mode='XYZ',
+                 lock_location=(False, True, False), lock_rotation=(True, True, True), lock_scale=(False, False, False))
+        info['additive_controls'].append(ctrl_name)
+        items.append((eye, ctrl_name))
+
+    def job(pose):
+        for eye, ctrl_name in items:
+            for control in (parent_name, ctrl_name):
+                # Translation (in the plane of the face).
+                for axis, direction in (('X', control_x), ('Z', up)):
+                    _add_transform_constraint(armature_object, pose[eye], control, 'Eye Slide', map_from='LOCATION',
+                                              from_axis=axis, from_range=(0.0, 1.0), map_to='LOCATION',
+                                              to_values_min=Vector((0.0, 0.0, 0.0)),
+                                              to_values_max=_to_local(rest[eye], direction))
+                # Scale (the size of the iris).
+                c = typing_cast(bpy.types.TransformConstraint, _new_constraint(pose[eye], 'TRANSFORM', 'Eye Scale'))
+                c.target = armature_object
+                c.subtarget = control
+                c.owner_space = 'LOCAL'
+                c.target_space = 'LOCAL'
+                c.use_motion_extrapolate = True
+                c.map_from = 'SCALE'
+                c.map_to = 'SCALE'
+                for axis in 'xyz':
+                    setattr(c, f'from_min_{axis}_scale', 0.0)
+                    setattr(c, f'from_max_{axis}_scale', 1.0)
+                    setattr(c, f'to_min_{axis}_scale', 0.0)
+                    setattr(c, f'to_max_{axis}_scale', 1.0)
+                c.map_to_x_from, c.map_to_y_from, c.map_to_z_from = 'X', 'Y', 'Z'
+                c.mix_mode_scale = 'MULTIPLY'
+        return None
+    constraint_jobs.append(('additive', job))
 
 
 def _build_face(skeleton: Skeleton, smap: SkeletonMap, rest: dict, lengths: dict, face_unit: float, add_spec,
