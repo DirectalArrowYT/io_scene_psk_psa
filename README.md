@@ -22,6 +22,9 @@ For Blender 4.1 and lower, see [Legacy Compatibility](#legacy-compatibility).
 * PSA sequence metadata (e.g., frame rate) is preserved on import, allowing this data to be reused on export.
 * PSA sequences can be exported directly from actions or delineated using a scene's [timeline markers](https://docs.blender.org/manual/en/latest/animation/markers.html), pose markers, or NLA track strips, allowing direct use of the [NLA](https://docs.blender.org/manual/en/latest/editors/nla/index.html) when creating sequences.
 * Compress exported sequences via resampling ratios or frame quotas.
+* **Fix Bone Tails**: bones are re-oriented on import so that their tails point to the next joint (e.g., the upper arm points to the elbow). The original orientations are remembered, so PSA imports and PSK/PSA exports are identical to the originals.
+* **Animate Ready**: an optional control rig (IK arms & legs with IK/FK switching, foot roll, finger, eye & facial controls) that is set up on import. The controls are never exported, and PSA animations imported onto the rig are baked onto the controls automatically. See [Animate Ready Rig](#animate-ready-rig).
+* **Auto Setup Textures**: materials are set up with their textures automatically on import, using the material files exported by FModel (`.json`) or UE Viewer (`.mat`, `.props.txt`), or by matching texture names.
 
 # Usage
 
@@ -31,11 +34,36 @@ For Blender 4.1 and lower, see [Legacy Compatibility](#legacy-compatibility).
 1. Navigate to `File` > `Import` > `Unreal PSK (.psk/.pskx)`.
 2. Select the PSK file you want to import and click `Import`.
 
+#### Import options
+* **Fix Bone Tails** (Armature, on by default): re-orients the bones so that the bone tails point to the next joint instead of all pointing in the same direction. The original bone orientations are stored on the bones, so PSA imports & PSK/PSA exports are unaffected. Turn this off to get the raw bone orientations (the **Bone Length** option then applies).
+* **Animate Ready**: sets up the control rig described below.
+* **Auto Setup Textures** (Mesh, on by default): finds the textures for each material & builds the material node tree (base color, normal map, ORM/MRAO, emissive, opacity). The folder of the PSK file, its parent folder (including sub-folders such as `Mat/`, `Tex/`, `Textures/`), the folder structure of the original asset paths (e.g., `.../Game/Characters/...`) and an optional **Texture Folder** are searched. The alpha channel of the base color texture is only used as opacity for masked/translucent materials when it doesn't cut holes in the mesh (it's often used as a mask for other purposes).
+
 ### Importing a PSA
 1. Select an armature that you want import animations for.
 2. Navigate to `File` > `Import` > `Unreal PSA (.psa)`.
 3. Select the PSA file you want to import.
 4. Select the sequences that you want to import and click `Import`.
+
+## Animate Ready Rig
+Tick **Animate Ready** when importing a PSK (or use **Make Animate Ready** in the `PSK Rig` tab of the 3D Viewport's sidebar on an existing armature; existing actions are converted automatically) to set up a control rig for animating. The skeleton is analyzed automatically (bone names from most engines & tools are recognized, and the sides, up & forward directions are determined from the bone positions).
+
+| Controls | Description |
+|---|---|
+| **Arm & Leg IK** | `CTRL-hand_ik`, `CTRL-foot_ik` & pole targets (`CTRL-elbow_pole`, `CTRL-knee_pole`). The IK is analytic (exact, even for straight limbs). The twist rings (`CTRL-arm_twist`, `CTRL-forearm_twist`, etc.) twist the limbs around their own axis. |
+| **IK/FK switch** | Per-limb sliders in the `PSK Rig` panel. In FK mode, the deform bones are animated directly. The snap buttons match IK to FK (or vice versa) on the current frame. |
+| **Foot roll** | Per-foot slider. Positive values roll onto the ball of the foot (the heel lifts while the toes bend & stay on the floor), negative values lift the toes. `CTRL-toe` controls the toes. |
+| **Fingers** | Scale `CTRL-fingers` on its Y axis to curl all the fingers (0 = fist, above 1 = open wide) and rotate it on its Z axis to spread the fingers. Each finger also has its own curl control (`CTRL-finger_index`, etc.). |
+| **Eyes** | `CTRL-eyes` (both eyes) and `CTRL-eye` (per eye) aim targets. |
+| **Face** | Controls in front of the face: blink (`CTRL-blink`, move down to close the eyelids, up to open them wide), brows (`CTRL-brow`, move to raise/lower, rotate to tilt), mouth corners (`CTRL-mouth_corner`, smile/frown/wide/narrow), lips (`CTRL-lip_upper`/`CTRL-lip_lower`, move up/down & forward to pout), cheeks (`CTRL-cheek`) and jaw (`CTRL-jaw`, move down to open, sideways to shift). The individual facial bones can also be animated directly. |
+
+The finger, eye aim & face controls are layered on top of the FK animation, so imported animations look exactly the same while the controls are at rest.
+
+**Importing animations onto the rig:** when a PSA is imported onto an armature with the rig, the IK & eye controls are keyed on every frame so that the animation looks exactly as it was authored (**Bake to Rig Controls** import option).
+
+**Baking:** in the `PSK Rig` panel, **Bake FK → IK** keys the IK controls from the FK animation of the active action, and **Bake IK → FK** keys the deform bones with the result of all the controls (IK, eyes, fingers & face), switches to FK and removes the control keys. **Remove Rig** removes all the controls, leaving only the deform bones (bake to FK first to keep the animation made with the controls).
+
+**Exporting:** the rig is never exported. PSK & PSA exports only contain the deform bones, with the IK & other controls baked into the exported animation.
 
 ## Export
 It is highly recommended to use the provided [Collection Exporters](https://docs.blender.org/manual/en/latest/scene_layout/collections/collections.html#exporters) workflow, since it allows for highly reliable, repeatable exports of both PSK and PSA files. However, the traditional export workflow is available as well.

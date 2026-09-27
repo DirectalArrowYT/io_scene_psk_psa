@@ -5,10 +5,13 @@ import numpy as np
 import re
 from bpy.types import Armature, Context, FCurve, Object, Bone, PoseBone
 from mathutils import Vector, Quaternion
-from bpy_extras import anim_utils
 
 from ..shared.types import PSX_PG_action_export
+from ..shared.compat import action_ensure_channelbag_for_slot, action_ensure_slot, channelbag_ensure_fcurve
+from ..shared.helpers import get_bone_rest_correction, get_bone_original_matrix_local, is_rig_bone
 
+from ..rig.builder import get_rig_info, has_rig, set_rig_property
+from ..rig.bake import bake_fk_to_ik, get_action_frame_range
 from .config import PsaConfig, REMOVE_TRACK_LOCATION, REMOVE_TRACK_ROTATION
 from psk_psa_py.psa.reader import PsaReader
 from psk_psa_py.shared.data import PsxBone
@@ -41,7 +44,8 @@ class PsaImportOptions:
                  should_write_keyframes: bool = True,
                  should_write_metadata: bool = True,
                  should_write_scale_keys: bool = True,
-                 translation_scale: float = 1.0
+                 translation_scale: float = 1.0,
+                 should_bake_to_rig: bool = True,
                  ):
         self.action_name_prefix = action_name_prefix
         self.bone_mapping = bone_mapping
@@ -58,6 +62,9 @@ class PsaImportOptions:
         self.should_write_metadata = should_write_metadata
         self.should_write_scale_keys = should_write_scale_keys
         self.translation_scale = translation_scale
+        # If the armature has an "Animate Ready" control rig, key the IK & eye controls to match the imported
+        # animation.
+        self.should_bake_to_rig = should_bake_to_rig
 
 
 class ImportBone:
@@ -69,6 +76,8 @@ class ImportBone:
         self.original_location: Vector = Vector()
         self.original_rotation: Quaternion = Quaternion()
         self.post_rotation: Quaternion = Quaternion()
+        # Rest orientation correction of the armature bone (see `get_bone_rest_correction`), or None.
+        self.rest_correction: Quaternion | None = None
         self.fcurves: list[FCurve] = []
 
 
@@ -88,6 +97,14 @@ def _calculate_fcurve_data(import_bone: ImportBone, key_data: Sequence[float]):
     location = key_location - import_bone.original_location
     location.rotate(import_bone.post_rotation.conjugated())
     scale = Vector(key_data[7:10])
+    if import_bone.rest_correction is not None:
+        # The armature bone has been re-oriented (e.g., to fix the bone tails) relative to the orientation stored in
+        # the file. Convert the pose-space transform from the original bone basis to the re-oriented bone basis.
+        c = import_bone.rest_correction
+        rotation = c @ rotation @ c.conjugated()
+        location = c @ location
+        m = c.to_matrix()
+        scale = Vector(sum(m[i][j] ** 2 * scale[j] for j in range(3)) for i in range(3))
     return rotation.w, rotation.x, rotation.y, rotation.z, location.x, location.y, location.z, scale.x, scale.y, scale.z
 
 
@@ -212,7 +229,8 @@ def import_psa(context: Context, psa_reader: PsaReader, armature_object: Object,
     # Create an index mapping from bones in the PSA to bones in the target armature.
     psa_to_armature_bone_indices = {}
     armature_to_psa_bone_indices = {}
-    armature_bone_names = [x.name for x in armature_data.bones]
+    # Rig control & mechanism bones (see the "Animate Ready" import option) are never mapped to PSA bones.
+    armature_bone_names = [x.name if not is_rig_bone(x) else '' for x in armature_data.bones]
     psa_bone_names = []
     duplicate_mappings = []
 
@@ -241,6 +259,7 @@ def import_psa(context: Context, psa_reader: PsaReader, armature_object: Object,
 
     # Report if there are missing bones in the target armature.
     missing_bone_names = set(psa_bone_names).difference(set(armature_bone_names))
+    missing_bone_names.discard('')
     if len(missing_bone_names) > 0:
         result.warnings.append(
             f'The armature \'{armature_object.name}\' is missing {len(missing_bone_names)} bones that exist in '
@@ -278,15 +297,21 @@ def import_psa(context: Context, psa_reader: PsaReader, armature_object: Object,
                 # Add a warning if the parent bone is not in the PSA.
                 bones_with_missing_parents.append(armature_bone)
         # Calculate the original location & rotation of each bone (in world-space maybe?)
+        # NOTE: The *original* rest matrices are used here (i.e., the orientation of the bones as they were in the
+        # PSK), so that re-oriented bones are handled correctly.
+        matrix_local = get_bone_original_matrix_local(armature_bone)
         if has_parent:
-            import_bone.original_location = armature_bone.matrix_local.translation - armature_bone.parent.matrix_local.translation
-            import_bone.original_location.rotate(armature_bone.parent.matrix_local.to_quaternion().conjugated())
-            import_bone.original_rotation = armature_bone.matrix_local.to_quaternion()
-            import_bone.original_rotation.rotate(armature_bone.parent.matrix_local.to_quaternion().conjugated())
+            parent_matrix_local = get_bone_original_matrix_local(armature_bone.parent)
+            import_bone.original_location = matrix_local.translation - parent_matrix_local.translation
+            import_bone.original_location.rotate(parent_matrix_local.to_quaternion().conjugated())
+            import_bone.original_rotation = matrix_local.to_quaternion()
+            import_bone.original_rotation.rotate(parent_matrix_local.to_quaternion().conjugated())
             import_bone.original_rotation.conjugate()
         else:
-            import_bone.original_location = armature_bone.matrix_local.translation.copy()
-            import_bone.original_rotation = armature_bone.matrix_local.to_quaternion().conjugated()
+            import_bone.original_location = matrix_local.translation.copy()
+            import_bone.original_rotation = matrix_local.to_quaternion().conjugated()
+
+        import_bone.rest_correction = get_bone_rest_correction(armature_bone)
 
         import_bone.post_rotation = import_bone.original_rotation.conjugated()
 
@@ -314,10 +339,8 @@ def import_psa(context: Context, psa_reader: PsaReader, armature_object: Object,
             action = bpy.data.actions[action_name]
         else:
             action = bpy.data.actions.new(name=action_name)
-            action_slot = action.slots.new('OBJECT', armature_object.name)
 
-        # TODO: Wish there was a better way to do this.
-        action_slot = action.slots[f'OB{armature_object.name}']
+        action_slot = action_ensure_slot(action, 'OBJECT', armature_object.name)
 
         assert action_slot
 
@@ -334,7 +357,7 @@ def import_psa(context: Context, psa_reader: PsaReader, armature_object: Object,
                 assert False, f'Invalid FPS source: {options.fps_source}'
 
         if options.should_write_keyframes:            
-            channelbag = anim_utils.action_ensure_channelbag_for_slot(action, action_slot)
+            channelbag = action_ensure_channelbag_for_slot(action, action_slot)
 
             # Create f-curves for the rotation and location of each bone.
             for psa_bone_index, armature_bone_index in psa_to_armature_bone_indices.items():
@@ -348,16 +371,16 @@ def import_psa(context: Context, psa_reader: PsaReader, armature_object: Object,
                 add_location_fcurves = (bone_track_flags & REMOVE_TRACK_LOCATION) == 0
                 add_scale_fcurves = psa_reader.has_scale_keys and options.should_write_scale_keys
                 import_bone.fcurves = [
-                    channelbag.fcurves.ensure(rotation_data_path, index=0, group_name=pose_bone.name) if add_rotation_fcurves else None,  # Qw
-                    channelbag.fcurves.ensure(rotation_data_path, index=1, group_name=pose_bone.name) if add_rotation_fcurves else None,  # Qx
-                    channelbag.fcurves.ensure(rotation_data_path, index=2, group_name=pose_bone.name) if add_rotation_fcurves else None,  # Qy
-                    channelbag.fcurves.ensure(rotation_data_path, index=3, group_name=pose_bone.name) if add_rotation_fcurves else None,  # Qz
-                    channelbag.fcurves.ensure(location_data_path, index=0, group_name=pose_bone.name) if add_location_fcurves else None,  # Lx
-                    channelbag.fcurves.ensure(location_data_path, index=1, group_name=pose_bone.name) if add_location_fcurves else None,  # Ly
-                    channelbag.fcurves.ensure(location_data_path, index=2, group_name=pose_bone.name) if add_location_fcurves else None,  # Lz
-                    channelbag.fcurves.ensure(scale_data_path,    index=0, group_name=pose_bone.name) if add_scale_fcurves    else None,  # Sx
-                    channelbag.fcurves.ensure(scale_data_path,    index=1, group_name=pose_bone.name) if add_scale_fcurves    else None,  # Sy
-                    channelbag.fcurves.ensure(scale_data_path,    index=2, group_name=pose_bone.name) if add_scale_fcurves    else None,  # Sz
+                    channelbag_ensure_fcurve(channelbag, rotation_data_path, index=0, group_name=pose_bone.name) if add_rotation_fcurves else None,  # Qw
+                    channelbag_ensure_fcurve(channelbag, rotation_data_path, index=1, group_name=pose_bone.name) if add_rotation_fcurves else None,  # Qx
+                    channelbag_ensure_fcurve(channelbag, rotation_data_path, index=2, group_name=pose_bone.name) if add_rotation_fcurves else None,  # Qy
+                    channelbag_ensure_fcurve(channelbag, rotation_data_path, index=3, group_name=pose_bone.name) if add_rotation_fcurves else None,  # Qz
+                    channelbag_ensure_fcurve(channelbag, location_data_path, index=0, group_name=pose_bone.name) if add_location_fcurves else None,  # Lx
+                    channelbag_ensure_fcurve(channelbag, location_data_path, index=1, group_name=pose_bone.name) if add_location_fcurves else None,  # Ly
+                    channelbag_ensure_fcurve(channelbag, location_data_path, index=2, group_name=pose_bone.name) if add_location_fcurves else None,  # Lz
+                    channelbag_ensure_fcurve(channelbag, scale_data_path, index=0, group_name=pose_bone.name) if add_scale_fcurves    else None,  # Sx
+                    channelbag_ensure_fcurve(channelbag, scale_data_path, index=1, group_name=pose_bone.name) if add_scale_fcurves    else None,  # Sy
+                    channelbag_ensure_fcurve(channelbag, scale_data_path, index=2, group_name=pose_bone.name) if add_scale_fcurves    else None,  # Sz
                 ]
 
             # Read the sequence data matrix from the PSA.
@@ -417,6 +440,32 @@ def import_psa(context: Context, psa_reader: PsaReader, armature_object: Object,
         actions.append(action)
 
         context.window_manager.progress_update(sequence_index)
+
+    # If the armature has an "Animate Ready" control rig, bake the imported (FK) animation onto the IK & eye controls
+    # so that the animation looks exactly the same with the controls enabled.
+    if options.should_bake_to_rig and options.should_write_keyframes and has_rig(armature_object) and actions:
+        animation_data = armature_object.animation_data or armature_object.animation_data_create()
+        saved_action = animation_data.action
+        saved_slot = animation_data.action_slot if saved_action is not None else None
+        # Keep the current state of the IK/FK switches (the controls are baked regardless, so that switching to IK
+        # later on also works).
+        rig_info = get_rig_info(armature_object) or {}
+        saved_switches = {p: armature_object[p] for p in rig_info.get('properties', [])
+                          if p in armature_object and not p.startswith('foot_roll_')}
+        try:
+            for action in actions:
+                animation_data.action = action
+                animation_data.action_slot = action_ensure_slot(action, 'OBJECT', armature_object.name)
+                frame_start, frame_end = get_action_frame_range(action)
+                bake_fk_to_ik(context, armature_object, frame_start, frame_end)
+        except RuntimeError as e:
+            result.warnings.append(f'Failed to bake the animation to the rig controls: {e}')
+        finally:
+            animation_data.action = saved_action
+            if saved_slot is not None:
+                animation_data.action_slot = saved_slot
+            for prop, value in saved_switches.items():
+                set_rig_property(armature_object, prop, value)
 
     # If the user specifies, store the new animations as strips on a non-contributing NLA track.
     if options.should_stash:

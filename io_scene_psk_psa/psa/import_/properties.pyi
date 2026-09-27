@@ -38,6 +38,7 @@ class PsaImportMixin:
     compression_ratio_source: str
     compression_ratio_custom: float
     translation_scale: float
+    should_bake_to_rig: bool
     
 class PSA_PG_import:
     psa_error: str

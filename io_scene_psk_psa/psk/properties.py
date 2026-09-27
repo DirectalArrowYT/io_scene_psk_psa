@@ -137,6 +137,45 @@ class PskImportMixin:
         default=1.0,
         soft_min=0.0,
     )
+    should_fix_bone_orientation: BoolProperty(
+        default=True,
+        name='Fix Bone Tails',
+        options=set(),
+        description='Re-orient the bones so that the bone tails point to the next joint (e.g., the upper arm points '
+                    'to the elbow), instead of all of the bones pointing in the same direction.\n\n'
+                    'The original bone orientations are remembered, so PSA imports and PSK/PSA exports are unaffected'
+    )
+    should_make_animate_ready: BoolProperty(
+        default=False,
+        name='Animate Ready',
+        options=set(),
+        description='Set up a control rig for animating: IK arms & legs (with IK/FK switching, pole targets and '
+                    'twist controls), foot roll, finger curl & spread controls, eye aim targets and facial controls.\n\n'
+                    'The controls are never exported to PSK/PSA files, and PSA animations imported onto the armature '
+                    'are automatically baked onto the controls'
+    )
+    rig_use_arm_ik: BoolProperty(default=True, name='Arm IK', options=set(), description='Add IK controls to the arms')
+    rig_use_leg_ik: BoolProperty(default=True, name='Leg IK', options=set(), description='Add IK controls & a foot roll to the legs')
+    rig_use_fingers: BoolProperty(default=True, name='Fingers', options=set(), description='Add hand controls to curl & spread the fingers')
+    rig_use_eyes: BoolProperty(default=True, name='Eyes', options=set(), description='Add eye aim target controls')
+    rig_use_face: BoolProperty(default=True, name='Face', options=set(),
+                               description='Add facial controls (blink, brows, jaw, mouth corners, lips & cheeks)')
+    should_setup_material_textures: BoolProperty(
+        default=True,
+        name='Auto Setup Textures',
+        options=set(),
+        description='Automatically find the textures for the materials and set up the material node trees.\n\n'
+                    'Material definition files exported by FModel (.json) or UE Viewer (.mat, .props.txt) are used '
+                    'when available, otherwise the textures are matched by name. The folder of the PSK file and the '
+                    'folders around it are searched'
+    )
+    texture_search_directory: StringProperty(
+        name='Texture Folder',
+        default='',
+        subtype='DIR_PATH',
+        options=set(),
+        description='An additional folder to search for textures & material files (optional)'
+    )
     bdk_repository_id: StringProperty(
         name='BDK Repository ID',
         default='',

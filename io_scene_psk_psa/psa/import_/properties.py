@@ -110,6 +110,13 @@ class PsaImportMixin:
         soft_max=1.0,
         step=0.0625,
     )
+    should_bake_to_rig: BoolProperty(
+        default=True,
+        name='Bake to Rig Controls',
+        options=set(),
+        description='If the armature has an "Animate Ready" control rig, key the IK & eye controls so that they '
+                    'match the imported animation'
+    )
     translation_scale: FloatProperty(
         name='Translation Scale',
         default=1.0,

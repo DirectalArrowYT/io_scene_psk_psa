@@ -103,6 +103,7 @@ def test_psk_import_bone_length():
         filepath=SUZANNE_FILEPATH,
         components='ARMATURE',
         bone_length=bone_length,
+        should_fix_bone_orientation=False,
         ) == {'FINISHED'}
     
     armature_object = bpy.data.objects.get('Suzanne', None)

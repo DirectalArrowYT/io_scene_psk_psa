@@ -197,6 +197,7 @@ def psa_import_options_from_property_group(pg: PsaImportMixin, sequence_names: I
     options.fps_source = pg.fps_source
     options.fps_custom = pg.fps_custom
     options.translation_scale = pg.translation_scale
+    options.should_bake_to_rig = pg.should_bake_to_rig
     return options
 
 
@@ -263,7 +264,8 @@ class PSA_OT_import_all(Operator, PsaImportMixin):
             should_write_keyframes=self.should_write_keyframes,
             should_write_metadata=self.should_write_metadata,
             should_write_scale_keys=self.should_write_scale_keys,
-            translation_scale=self.translation_scale
+            translation_scale=self.translation_scale,
+            should_bake_to_rig=self.should_bake_to_rig,
         )
 
         assert context.view_layer
@@ -385,6 +387,7 @@ class PSA_OT_import(Operator, ImportHelper, PsaImportMixin):
                 col.use_property_split = True
                 col.use_property_decorate = False
                 col.prop(self, 'should_convert_to_samples')
+                col.prop(self, 'should_bake_to_rig')
 
         advanced_header, advanced_panel = layout.panel('advanced_panel_id', default_closed=True)
         advanced_header.label(text='Advanced')
@@ -436,6 +439,7 @@ def draw_psa_import_options_no_panels(layout, pg: PsaImportMixin):
         col.use_property_split = True
         col.use_property_decorate = False
         col.prop(pg, 'should_convert_to_samples')
+        col.prop(pg, 'should_bake_to_rig')
 
     col = layout.column(heading='Bone Mapping')
     col.use_property_split = True

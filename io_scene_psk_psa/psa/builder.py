@@ -4,7 +4,7 @@ from psk_psa_py.psa.data import Psa
 from typing import Tuple
 from mathutils import Matrix, Quaternion, Vector
 
-from ..shared.helpers import PsxBoneCollection, convert_bpy_quaternion_to_psx_quaternion, convert_vector_to_vector3, create_psx_bones, get_coordinate_system_transform
+from ..shared.helpers import PsxBoneCollection, convert_bpy_quaternion_to_psx_quaternion, convert_vector_to_vector3, create_psx_bones, get_coordinate_system_transform, get_pose_bone_original_matrix
 
 
 class PsaBuildSequence:
@@ -98,8 +98,10 @@ def _get_pose_bone_location_and_rotation(
     scale: Vector,
     coordinate_system_transform: Matrix,
 ) -> Tuple[Vector, Quaternion]:
+    # NOTE: The pose matrices are evaluated with the original (i.e., PSK file) bone orientations, so that bones that
+    # have been re-oriented in Blender (e.g., to fix the bone tails) are exported correctly.
     if pose_bone.parent is not None:
-        pose_bone_matrix = pose_bone.parent.matrix.inverted() @ pose_bone.matrix
+        pose_bone_matrix = get_pose_bone_original_matrix(pose_bone.parent).inverted() @ get_pose_bone_original_matrix(pose_bone)
     else:
         # Root bone
         # Get the bone's pose matrix and transform it into the export space.
@@ -109,21 +111,21 @@ def _get_pose_bone_location_and_rotation(
         if export_bone.is_attached_to_armature:
             # Get the world space matrix of both this bone and the bone that we're attached to,
             # then calculate a matrix relative to the attached bone.
-            world_matrix = armature_object.matrix_world @ pose_bone.matrix
+            world_matrix = armature_object.matrix_world @ get_pose_bone_original_matrix(pose_bone)
             assert export_bone.armature_object
             my_parent = export_bone.armature_object.parent
             assert my_parent
             my_parent_bone = export_bone.armature_object.parent_bone
             assert my_parent.pose
             parent_pose_bone = my_parent.pose.bones[my_parent_bone]
-            parent_world_matrix = my_parent.matrix_world @ parent_pose_bone.matrix
+            parent_world_matrix = my_parent.matrix_world @ get_pose_bone_original_matrix(parent_pose_bone)
             pose_bone_matrix = parent_world_matrix.inverted() @ world_matrix
         else:
             match export_space:
                 case 'ARMATURE':
-                    pose_bone_matrix = pose_bone.matrix
+                    pose_bone_matrix = get_pose_bone_original_matrix(pose_bone)
                 case 'WORLD':
-                    pose_bone_matrix = armature_object.matrix_world @ pose_bone.matrix
+                    pose_bone_matrix = armature_object.matrix_world @ get_pose_bone_original_matrix(pose_bone)
                 case 'ROOT':
                     pose_bone_matrix = Matrix.Identity(4)
                 case _:

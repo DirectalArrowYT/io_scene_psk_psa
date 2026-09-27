@@ -4,6 +4,7 @@ from .shared import (
     dfs as shared_dfs,
     ui as shared_ui,
     operators as shared_operators,
+    compat as shared_compat,
 )
 from .psk import (
     builder as psk_builder,
@@ -30,6 +31,16 @@ from .psa.export import (
     ui as psa_export_ui,
     operators as psa_export_operators,
 )
+from .rig import (
+    skeleton as rig_skeleton,
+    orientation as rig_orientation,
+    widgets as rig_widgets,
+    builder as rig_builder,
+    bake as rig_bake,
+    operators as rig_operators,
+    ui as rig_ui,
+)
+from .psk import materials as psk_materials
 from .psa.import_ import (
     operators as psa_import_operators,
     ui as psa_import_ui,
@@ -46,6 +57,16 @@ if _needs_reload:
     importlib.reload(shared_dfs)
     importlib.reload(shared_ui)
     importlib.reload(shared_operators)
+    importlib.reload(shared_compat)
+
+    importlib.reload(rig_skeleton)
+    importlib.reload(rig_orientation)
+    importlib.reload(rig_widgets)
+    importlib.reload(rig_builder)
+    importlib.reload(rig_bake)
+    importlib.reload(rig_operators)
+    importlib.reload(rig_ui)
+    importlib.reload(psk_materials)
 
     importlib.reload(psk_builder)
     importlib.reload(psk_importer)
@@ -104,6 +125,8 @@ _modules = (
     psa_import_operators,
     psa_import_ui,
     psa_file_handlers,
+    rig_operators,
+    rig_ui,
 )
 
 def register():

@@ -15,6 +15,15 @@ class PskImportMixin:
     bone_length: float
     should_import_shape_keys: bool
     scale: float
+    should_fix_bone_orientation: bool
+    should_make_animate_ready: bool
+    rig_use_arm_ik: bool
+    rig_use_leg_ik: bool
+    rig_use_fingers: bool
+    rig_use_eyes: bool
+    rig_use_face: bool
+    should_setup_material_textures: bool
+    texture_search_directory: str
     bdk_repository_id: str
 
 

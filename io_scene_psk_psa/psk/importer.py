@@ -10,6 +10,9 @@ from psk_psa_py.psk.data import Psk
 from psk_psa_py.shared.data import PsxBone
 from .properties import poly_flags_to_triangle_type_and_bit_flags
 from ..shared.helpers import is_bdk_addon_loaded, rgb_to_srgb
+from ..rig.builder import RigOptions, build_rig
+from ..rig.orientation import reorient_armature_bones
+from .materials import MaterialTextureFinder, finalize_material_alpha, setup_material
 
 
 class PskImportOptions:
@@ -27,6 +30,13 @@ class PskImportOptions:
         self.scale = 1.0
         self.bdk_repository_id: str | None = None
         self.should_import_smoothing_groups = True
+        self.should_fix_bone_orientation = False
+        self.should_make_animate_ready = False
+        self.rig_options = RigOptions()
+        self.should_setup_material_textures = False
+        self.texture_search_directory = ''
+        # The path of the PSK file (used for finding textures).
+        self.filepath = ''
 
 
 class ImportBone:
@@ -136,6 +146,9 @@ def import_psk(psk: Psk, context: Context, name: str, options: PskImportOptions)
 
         # Materials
         if options.should_import_materials:
+            texture_finder = None
+            if options.should_setup_material_textures and options.filepath:
+                texture_finder = MaterialTextureFinder(options.filepath, options.texture_search_directory)
             for material_index, psk_material in enumerate(psk.materials):
                 material_name = psk_material.name.decode('utf-8')
                 material = None
@@ -157,6 +170,11 @@ def import_psk(psk: Psk, context: Context, name: str, options: PskImportOptions)
                     mesh_triangle_type, mesh_triangle_bit_flags = poly_flags_to_triangle_type_and_bit_flags(psk_material.poly_flags)
                     material.psk.mesh_triangle_type = mesh_triangle_type
                     material.psk.mesh_triangle_bit_flags = mesh_triangle_bit_flags
+                    if texture_finder is not None:
+                        try:
+                            setup_material(material, texture_finder)
+                        except Exception as e:
+                            result.warnings.append(f'Failed to set up the textures for material "{material_name}": {e}')
                 
                 mesh_data.materials.append(material)
 
@@ -207,6 +225,11 @@ def import_psk(psk: Psk, context: Context, name: str, options: PskImportOptions)
                 uv_layer_data_index += 1
         uv_layer = mesh_data.uv_layers.new(name='UVMap')
         uv_layer.uv.foreach_set('vector', uv_layer_data.ravel())
+
+        # Decide whether the materials use the alpha channel of their textures (this requires the UVs).
+        for material_index, material in enumerate(mesh_data.materials):
+            if material is not None:
+                finalize_material_alpha(material, mesh_data, material_index)
 
         # Extra UVs
         if psk.has_extra_uvs and options.should_import_extra_uvs:
@@ -302,6 +325,16 @@ def import_psk(psk: Psk, context: Context, name: str, options: PskImportOptions)
         bpy.ops.object.mode_set(mode='OBJECT')
     except:
         pass
+
+    if armature_object is not None and (options.should_fix_bone_orientation or options.should_make_animate_ready):
+        # The control rig requires the bones to be properly oriented.
+        reorient_armature_bones(context, armature_object, options.bone_length)
+
+    if armature_object is not None and options.should_make_animate_ready:
+        rig_result = build_rig(context, armature_object, options.rig_options)
+        result.warnings.extend(rig_result.warnings)
+        if not rig_result.info.get('arms') and not rig_result.info.get('legs'):
+            result.warnings.append('No arms or legs were found in the skeleton, so no IK controls were created')
 
     result.armature_object = armature_object
     result.mesh_object = mesh_object

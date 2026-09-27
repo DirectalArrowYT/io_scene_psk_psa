@@ -15,6 +15,7 @@ from ..shared.helpers import (
     convert_bpy_quaternion_to_psx_quaternion,
     convert_string_to_cp1252_bytes,
     create_psx_bones,
+    get_bone_original_matrix_local,
     get_armature_for_mesh_object,
     get_coordinate_system_transform,
     get_materials_for_mesh_objects,
@@ -65,7 +66,7 @@ def _get_mesh_export_space_matrix(node: ObjectNode | None, export_space: str) ->
             root_armature_data = typing_cast(Armature, root_armature_object.data)
             if len(root_armature_data.bones) == 0:
                 raise RuntimeError(f'Armature {root_armature_data.name} has no bones')
-            return (armature_space_matrix @ relative_matrix @ root_armature_data.bones[0].matrix_local).inverted()
+            return (armature_space_matrix @ relative_matrix @ get_bone_original_matrix_local(root_armature_data.bones[0])).inverted()
         case _:
             assert False, f'Invalid export space: {export_space}'
 

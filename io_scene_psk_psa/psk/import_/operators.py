@@ -23,6 +23,16 @@ def get_psk_import_options_from_properties(property_group: PskImportMixin):
     options.should_import_shape_keys = property_group.should_import_shape_keys
     options.scale = property_group.scale
 
+    options.should_fix_bone_orientation = property_group.should_fix_bone_orientation
+    options.should_make_animate_ready = property_group.should_make_animate_ready
+    options.rig_options.use_arm_ik = property_group.rig_use_arm_ik
+    options.rig_options.use_leg_ik = property_group.rig_use_leg_ik
+    options.rig_options.use_fingers = property_group.rig_use_fingers
+    options.rig_options.use_eyes = property_group.rig_use_eyes
+    options.rig_options.use_face = property_group.rig_use_face
+    options.should_setup_material_textures = property_group.should_setup_material_textures
+    options.texture_search_directory = property_group.texture_search_directory
+
     if property_group.bdk_repository_id:
         options.bdk_repository_id = property_group.bdk_repository_id
 
@@ -48,6 +58,10 @@ def psk_import_draw(layout: UILayout, props: PskImportMixin):
             col.use_property_decorate = False
             col.prop(props, 'should_import_extra_uvs', text='Extra UVs')
             col.prop(props, 'should_import_materials', text='Materials')
+            if props.should_import_materials:
+                col.prop(props, 'should_setup_material_textures')
+                if props.should_setup_material_textures:
+                    col.prop(props, 'texture_search_directory')
             col.prop(props, 'should_import_vertex_colors', text='Vertex Colors')
             if props.should_import_vertex_colors:
                 col.prop(props, 'vertex_color_space')
@@ -64,7 +78,25 @@ def psk_import_draw(layout: UILayout, props: PskImportMixin):
             col = row.column()
             col.use_property_split = True
             col.use_property_decorate = False
-            col.prop(props, 'bone_length')
+            col.prop(props, 'should_fix_bone_orientation')
+            if not props.should_fix_bone_orientation:
+                col.prop(props, 'bone_length')
+
+    if props.should_import_armature:
+        rig_header, rig_panel = layout.panel('rig_panel_id', default_closed=False)
+        rig_header.use_property_split = False
+        rig_header.prop(props, 'should_make_animate_ready', text='')
+        rig_header.label(text='Animate Ready', icon='POSE_HLT')
+        if rig_panel:
+            col = rig_panel.column(heading='Controls')
+            col.use_property_split = True
+            col.use_property_decorate = False
+            col.enabled = props.should_make_animate_ready
+            col.prop(props, 'rig_use_arm_ik')
+            col.prop(props, 'rig_use_leg_ik')
+            col.prop(props, 'rig_use_fingers')
+            col.prop(props, 'rig_use_eyes')
+            col.prop(props, 'rig_use_face')
 
     transform_header, transform_panel = layout.panel('transform_panel_id', default_closed=False)
     transform_header.label(text='Transform')
@@ -98,6 +130,7 @@ class PSK_OT_import(Operator, ImportHelper, PskImportMixin):
 
         name = os.path.splitext(os.path.basename(self.filepath))[0]
         options = get_psk_import_options_from_properties(self)
+        options.filepath = self.filepath
         result = import_psk(psk, context, name, options)
 
         if len(result.warnings):
@@ -150,6 +183,7 @@ class PSK_OT_import_drag_and_drop(Operator, PskImportMixin):
                 return {'CANCELLED'}
 
             name = os.path.splitext(file.name)[0]
+            options.filepath = str(filepath)
             result = import_psk(psk, context, name, options)
             if result.warnings:
                 warning_count += len(result.warnings)

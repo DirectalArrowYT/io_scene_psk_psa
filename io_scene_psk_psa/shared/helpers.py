@@ -8,6 +8,63 @@ from psk_psa_py.shared.data import PsxBone, Quaternion, Vector3
 from ..shared.types import BpyCollectionProperty, PSX_PG_bone_collection_list_item
 
 
+# Custom property (on `Bone`/`EditBone`) that stores the rotation that maps the (re-oriented) rest orientation of a
+# bone back to the original rest orientation of the bone as it was defined in the PSK file, as a (w, x, y, z)
+# quaternion, such that:
+#   original_matrix_local = bone.matrix_local @ correction
+# This allows bones to be re-oriented in Blender (e.g., so that the bone tails point toward their children) while
+# still being able to import and export PSK & PSA files that are identical to the originals.
+BONE_REST_CORRECTION_PROPERTY = 'psk_rest_correction'
+
+# Custom property (on `Bone`/`EditBone`) that marks a bone as belonging to the control rig (e.g., IK controls,
+# mechanism bones). These bones are never exported and never receive PSA animation data.
+RIG_BONE_PROPERTY = 'psk_rig'
+
+
+def get_bone_rest_correction(bone) -> BpyQuaternion | None:
+    """
+    Returns the rest orientation correction for a bone, or None if the bone has not been re-oriented.
+    """
+    value = bone.get(BONE_REST_CORRECTION_PROPERTY, None)
+    if value is None:
+        return None
+    try:
+        quaternion = BpyQuaternion(tuple(value))
+    except (TypeError, ValueError):
+        return None
+    if quaternion.magnitude < 1e-6:
+        return None
+    quaternion.normalize()
+    return quaternion
+
+
+def get_bone_original_matrix_local(bone) -> Matrix:
+    """
+    Returns the rest matrix (armature space) of the bone with its original (i.e., PSK file) orientation.
+    """
+    correction = get_bone_rest_correction(bone)
+    if correction is None:
+        return bone.matrix_local.copy()
+    return bone.matrix_local @ correction.to_matrix().to_4x4()
+
+
+def get_pose_bone_original_matrix(pose_bone) -> Matrix:
+    """
+    Returns the pose matrix (armature space) of the pose bone with its original (i.e., PSK file) orientation.
+    """
+    correction = get_bone_rest_correction(pose_bone.bone)
+    if correction is None:
+        return pose_bone.matrix.copy()
+    return pose_bone.matrix @ correction.to_matrix().to_4x4()
+
+
+def is_rig_bone(bone) -> bool:
+    """
+    Returns True if the bone is a control rig bone (i.e., it should never be exported).
+    """
+    return bool(bone.get(RIG_BONE_PROPERTY, ''))
+
+
 def rgb_to_srgb(c: float) -> float:
     if c > 0.0031308:
         return 1.055 * (pow(c, (1.0 / 2.4))) - 0.055
@@ -126,6 +183,10 @@ def get_export_bone_names(armature_object: Object, bone_filter_mode: str, bone_c
     bone_collections = list(armature_data.collections_all)
 
     for bone_index, bone in enumerate(bones):
+        # Control rig bones are never exported.
+        if is_rig_bone(bone):
+            continue
+
         # Check if this bone is in any of the collections in the bone collection indices list.
         this_bone_collection_indices = set(bone_collections.index(x) for x in bone.collections)
         is_in_exported_bone_collections = len(set(bone_collection_indices).intersection(this_bone_collection_indices)) > 0
@@ -196,7 +257,16 @@ def create_psx_bones_from_blender_bones(
             except ValueError:
                 pass
 
-        if bone.parent is not None:
+        is_corrected = get_bone_rest_correction(bone) is not None or \
+            (bone.parent is not None and get_bone_rest_correction(bone.parent) is not None)
+
+        if bone.parent is not None and is_corrected:
+            # Child bone that has been re-oriented (or whose parent has been re-oriented).
+            # Calculate the bone transform relative to its parent using the original bone orientations.
+            relative_matrix = get_bone_original_matrix_local(bone.parent).inverted() @ get_bone_original_matrix_local(bone)
+            rotation = relative_matrix.to_quaternion().conjugated()
+            location = relative_matrix.translation
+        elif bone.parent is not None:
             # Child bone.
             rotation = bone.matrix.to_quaternion().conjugated()
             inverse_parent_rotation = bone.parent.matrix.to_quaternion().inverted()
@@ -205,7 +275,7 @@ def create_psx_bones_from_blender_bones(
             location = (parent_tail - parent_head) + bone.head
         else:
             location = armature_object_matrix_world @ bone.head
-            bone_rotation = bone.matrix.to_quaternion().conjugated()
+            bone_rotation = get_bone_original_matrix_local(bone).to_quaternion().conjugated()
             rotation = bone_rotation @ armature_object_matrix_world.to_3x3().to_quaternion()
             rotation.conjugate()
 
@@ -427,7 +497,7 @@ def create_psx_bones(
                     except KeyError:
                         raise RuntimeError(f'Bone \'{parent_bone_name}\' could not be found in armature \'{armature_object.parent.name}\'.')    
                     
-                    parent_bone_world_matrix = armature_object.parent.matrix_world @ parent_bone.matrix_local.to_4x4()
+                    parent_bone_world_matrix = armature_object.parent.matrix_world @ get_bone_original_matrix_local(parent_bone)
                     parent_bone_world_location, parent_bone_world_rotation, _ = parent_bone_world_matrix.decompose()
 
                     # Convert the root bone location to be relative to the parent bone.
@@ -511,7 +581,7 @@ def create_psx_bones(
                 raise RuntimeError('Cannot export to Armature space when multiple armatures are being exported.')
         
             armature_data = typing_cast(Armature, root_bone_armature_object.data)
-            matrix_local = armature_data.bones[root_bone.name.decode('windows-1252')].matrix_local
+            matrix_local = get_bone_original_matrix_local(armature_data.bones[root_bone.name.decode('windows-1252')])
             location, rotation, _ = matrix_local.decompose()
             root_bone.location = convert_vector_to_vector3(location)
             root_bone.rotation = convert_bpy_quaternion_to_psx_quaternion(rotation)
