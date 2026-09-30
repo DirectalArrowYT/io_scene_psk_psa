@@ -133,7 +133,16 @@ def compute_bone_orientations(skeleton: Skeleton, smap: SkeletonMap, default_len
                     length = direction.length * 0.5
                 if direction.length <= skeleton.epsilon:
                     continue
-                orientations[bone] = BoneOrientation(direction, max(length, min_length), z_axis_hint=palm)
+                z_hint = palm
+                if kind == 'thumb' and finger_bases and palm is not None:
+                    # The thumb does not curl toward the palm normal like the other fingers, it folds across the
+                    # palm toward the little finger. Bending it toward the palm normal curls it backwards, away
+                    # from the hand.
+                    across = sum(finger_bases, Vector()) / len(finger_bases) - head
+                    across -= direction.normalized() * across.dot(direction.normalized())
+                    if across.length > skeleton.epsilon:
+                        z_hint = (across.normalized() + palm).normalized()
+                orientations[bone] = BoneOrientation(direction, max(length, min_length), z_axis_hint=z_hint)
 
     for side, leg in smap.legs.items():
         hip, knee, ankle = skeleton.head(leg.upper), skeleton.head(leg.lower), skeleton.head(leg.foot)

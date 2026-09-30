@@ -50,7 +50,8 @@ MECHANISM_COLOR = 'THEME10'
 
 # Default ranges for the control mappings.
 FINGER_CURL_ANGLE = math.radians(85.0)
-THUMB_CURL_ANGLE = math.radians(50.0)
+THUMB_CURL_ANGLE = math.radians(55.0)
+THUMB_CURL_WEIGHTS = (0.35, 0.8, 1.0)
 FINGER_SPREAD_ANGLE = math.radians(15.0)
 FOOT_ROLL_ANGLE = math.radians(60.0)
 JAW_OPEN_ANGLE = math.radians(30.0)
@@ -585,8 +586,11 @@ def build_rig(context: Context, armature_object: Object, options: RigOptions) ->
                     offsets[kind] = (skeleton.head(bones[0]) - reference_position).dot(x_axis)
                 max_offset = max((abs(v) for v in offsets.values()), default=0.0)
                 for kind, bones in arm.fingers.items():
-                    curl = THUMB_CURL_ANGLE if kind == 'thumb' else FINGER_CURL_ANGLE
-                    for bone in bones:
+                    for index, bone in enumerate(bones):
+                        curl = FINGER_CURL_ANGLE
+                        if kind == 'thumb':
+                            # The thumb's base joint moves much less than its tip.
+                            curl = THUMB_CURL_ANGLE * THUMB_CURL_WEIGHTS[min(index, len(THUMB_CURL_WEIGHTS) - 1)]
                         # Curl (around the local X axis, toward the palm), from the scale of the controls.
                         for control, label in ((master_name, 'Fingers Curl'), (finger_controls[kind], 'Finger Curl')):
                             _add_transform_constraint(armature_object, pose[bone], control, label,

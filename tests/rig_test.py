@@ -342,6 +342,23 @@ def test_test_model_full_workflow():
             assert max(abs(a - b) for a, b in zip(original_key.location, exported_key.location)) < 5e-2, (frame, name)
 
 
+@pytest.mark.skipif(not os.path.isdir(TEST_MODEL_DIRECTORY), reason='Test model not available')
+def test_thumb_curls_across_the_palm():
+    """Curling the fingers must fold the thumb toward the palm, not bend it backwards away from the hand."""
+    armature_object = _import_psk(TEST_MODEL_PSK, should_make_animate_ready=True)
+    bones = armature_object.data.bones
+    pose_bones = armature_object.pose.bones
+    for side in 'LR':
+        palm_centre = (bones[f'{side}_middlefinger_A'].head_local + bones[f'{side}_littlefinger_A'].head_local) / 2
+        bpy.context.view_layer.update()
+        rest = (pose_bones[f'{side}_thumbfinger_C'].tail - palm_centre).length
+        pose_bones[f'CTRL-fingers.{side}'].scale.y = 0.0
+        bpy.context.view_layer.update()
+        curled = (pose_bones[f'{side}_thumbfinger_C'].tail - palm_centre).length
+        pose_bones[f'CTRL-fingers.{side}'].scale.y = 1.0
+        assert curled < rest * 0.8
+
+
 def test_eye_style_aim_for_eyeballs():
     armature_object = _import_psk(SARGE_FILEPATH, should_make_animate_ready=True)
     from io_scene_psk_psa.rig.builder import get_rig_info
