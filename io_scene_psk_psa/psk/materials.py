@@ -31,6 +31,13 @@ ALPHA_CANDIDATE_PROPERTY = 'psk_alpha_candidate'
 # The opacity mask clip value used by Unreal Engine by default.
 OPACITY_MASK_CLIP_VALUE = 1.0 / 3.0
 MAX_SEARCH_DEPTH = 5
+# How many folders above the PSK file are searched (e.g., `Model/<Id>/Mesh/<Mesh>/x.psk` -> `Model/` and beyond, so
+# that materials & textures shared between models are found).
+MAX_PARENT_LEVELS = 5
+# Folders that are never searched from (too broad).
+_STOP_FOLDER_NAMES = {'home', 'users', 'documents', 'desktop', 'downloads', 'onedrive'}
+# The time budget for indexing the files (seconds).
+MAX_INDEX_SECONDS = 5.0
 
 # Unreal blend modes.
 BLEND_OPAQUE = 0
@@ -51,10 +58,11 @@ _BLEND_MODE_NAMES = {
 _SLOT_PARAMETERS = {
     'base_color': ('diffuse', 'basecolor', 'basecolortexture', 'basecolormap', 'albedo', 'albedotexture',
                    'pmdiffuse', 'diffusetexture', 'diffusemap', 'colortexture', 'color', 'maintex', 'maintexture',
-                   'texture', 'tex', 'basetexture', 'basemap', 'colormap', 'd', 'bc'),
+                   'basetexture', 'basemap', 'colormap', 'd', 'bc'),
     'normal': ('normal', 'normals', 'normalmap', 'normaltexture', 'pmnormals', 'pmnormal', 'bump', 'bumpmap', 'n'),
     'orm': ('orm', 'occlusionroughnessmetallic', 'aorm', 'ormtexture', 'packedtexture', 'packed'),
     'mrao': ('mrao', 'metallicroughnessao', 'mra'),
+    'ao': ('ao', 'textureao', 'aotexture', 'aomap', 'ambientocclusion', 'occlusion', 'occlusionmap', 'occlusiontexture'),
     'emissive': ('emissive', 'emission', 'emissivetexture', 'emissivemap', 'pmemissive', 'glow'),
     'opacity': ('opacity', 'opacitymask', 'alpha', 'alphamask', 'opacitytexture'),
 }
@@ -65,6 +73,7 @@ _SLOT_SUFFIXES = {
     'normal': ('_n', '_normal', '_nrm', '_nm', '_norm', '_normals'),
     'orm': ('_orm', '_arm', '_rma'),
     'mrao': ('_mrao', '_mra'),
+    'ao': ('_ao', '_occ', '_occlusion', '_ambientocclusion'),
     'emissive': ('_e', '_emissive', '_emission', '_em', '_glow'),
     'opacity': ('_o', '_opacity', '_alpha', '_op'),
 }
@@ -226,8 +235,16 @@ class MaterialTextureFinder:
         self.psk_path = Path(psk_filepath).resolve() if psk_filepath else None
         self.roots: list[Path] = []
         if self.psk_path is not None:
-            self.roots.append(self.psk_path.parent)
-            self.roots.append(self.psk_path.parent.parent)
+            # Search the folder of the PSK first, then gradually the folders above it (nearer files take precedence).
+            folder = self.psk_path.parent
+            for _ in range(MAX_PARENT_LEVELS + 1):
+                if folder.name.lower() in _STOP_FOLDER_NAMES or folder.parent == folder or folder == Path.home():
+                    break
+                self.roots.append(folder)
+                if folder.name.lower() in ('game', 'content', 'exports'):
+                    # The root of an exported content hierarchy.
+                    break
+                folder = folder.parent
         if extra_directory:
             extra = Path(bpy.path.abspath(extra_directory))
             if extra.is_dir():
@@ -235,11 +252,17 @@ class MaterialTextureFinder:
         self.textures: dict[str, list[Path]] = {}
         self.materials: dict[str, list[Path]] = {}
         self._images: dict[str, bpy.types.Image] = {}
+        self._placeholders: dict[str, bool] = {}
+        self._definitions: dict[str, MaterialDefinition | None] = {}
         self._build_index()
 
     def _build_index(self):
+        import time
         visited: set[Path] = set()
+        deadline = time.monotonic() + MAX_INDEX_SECONDS
         for root in self.roots:
+            if time.monotonic() > deadline:
+                break
             if not root.is_dir():
                 continue
             count = 0
@@ -264,7 +287,7 @@ class MaterialTextureFinder:
                         self.materials.setdefault(lower[:-len('.props.txt')], []).append(path)
                     elif lower.endswith(('.json', '.mat')):
                         self.materials.setdefault(os.path.splitext(lower)[0], []).append(path)
-                if count > MAX_INDEXED_FILES:
+                if count > MAX_INDEXED_FILES or time.monotonic() > deadline:
                     break
 
     def _content_roots(self) -> list[Path]:
@@ -297,11 +320,33 @@ class MaterialTextureFinder:
                 folders = [p.lower() for p in path.parent.parts]
                 return sum(1 for p in parts if p in folders)
             candidates = sorted(candidates, key=score, reverse=True)
-        # Prefer lossless formats.
-        return sorted(candidates, key=lambda p: TEXTURE_EXTENSIONS.index(p.suffix.lower()) if p.suffix.lower() in TEXTURE_EXTENSIONS else 99)[0]
+        # The candidates are ordered by how close they are to the PSK file. Prefer lossless formats among equals.
+        return candidates[0]
 
-    def find_material_definition(self, material_name: str) -> MaterialDefinition | None:
-        for path in self.materials.get(material_name.lower(), []):
+    def is_placeholder(self, path: Path) -> bool:
+        """
+        Returns True if the texture is a solid color (e.g., the black/white/gray placeholder textures that are assigned
+        to unused material slots).
+        """
+        key = str(path)
+        if key not in self._placeholders:
+            result = False
+            image = self.get_image(path)
+            if image is not None:
+                try:
+                    import numpy as np
+                    pixels = np.empty(len(image.pixels), dtype=np.float32)
+                    image.pixels.foreach_get(pixels)
+                    rgb = pixels.reshape(-1, image.channels)[:, :3]
+                    result = float((rgb.max(axis=0) - rgb.min(axis=0)).max()) < 0.02
+                except Exception:
+                    result = False
+            self._placeholders[key] = result
+        return self._placeholders[key]
+
+    def _parse_definition(self, path: Path) -> MaterialDefinition | None:
+        key = str(path)
+        if key not in self._definitions:
             lower = path.name.lower()
             if lower.endswith('.json'):
                 definition = _parse_json_material(path)
@@ -309,6 +354,50 @@ class MaterialTextureFinder:
                 definition = _parse_props_txt(path)
             else:
                 definition = _parse_umodel_mat(path)
+            self._definitions[key] = definition
+        return self._definitions[key]
+
+    def find_material_definition(self, material_name: str) -> MaterialDefinition | None:
+        for path in self.materials.get(material_name.lower(), []):
+            definition = self._parse_definition(path)
+            if definition is not None:
+                return definition
+        return self._find_variant_material_definition(material_name)
+
+    def _find_variant_material_definition(self, material_name: str) -> MaterialDefinition | None:
+        """
+        Finds the material definition of a material variant for which there is no definition file. For example, the
+        costume variant `MII_Pl13100_body_CV` uses the definition of `MII_Pl13101_body` (same part, most similar id).
+        """
+        tokens = _tokens(material_name)
+        if len(tokens) < 2:
+            return None
+        prefix = tokens[0] if tokens[0] in _MATERIAL_PREFIXES else None
+        body = tokens[1:] if prefix else tokens
+        parts = [t for t in body if t not in _VARIANT_TOKENS and not t.isdigit()]
+        if len(parts) < 2:
+            return None
+        # e.g. [pl13100, body]: the id is the first token, the part is the rest.
+        material_id, part = parts[0], parts[1:]
+        best = None
+        for name, paths in self.materials.items():
+            candidate_tokens = _tokens(name)
+            if prefix and (not candidate_tokens or candidate_tokens[0] != prefix):
+                continue
+            candidate_body = candidate_tokens[1:] if prefix else candidate_tokens
+            candidate_parts = [t for t in candidate_body if t not in _VARIANT_TOKENS and not t.isdigit()]
+            if len(candidate_parts) < 2 or candidate_parts[1:] != part:
+                continue
+            common = len(os.path.commonprefix([material_id, candidate_parts[0]]))
+            # The ids must at least share the character (e.g., `pl13`).
+            if common < min(4, len(material_id)):
+                continue
+            if best is None or common > best[0]:
+                best = (common, paths)
+        if best is None:
+            return None
+        for path in best[1]:
+            definition = self._parse_definition(path)
             if definition is not None:
                 return definition
         return None
@@ -347,21 +436,27 @@ def _choose_slot_texture(finder: MaterialTextureFinder, definition: MaterialDefi
         if score is None:
             continue
         path = finder.find_texture(reference)
-        if path is not None:
+        if path is not None and not finder.is_placeholder(path):
             scored.append((score, path))
     if scored:
         return sorted(scored, key=lambda x: x[0])[0][1]
-    # Look at the texture names instead (e.g., for UE Viewer `.mat` files with generic `Other[0]` entries).
+    # Look at the texture names instead (e.g., for UE Viewer `.mat` files with generic `Other[0]` entries). FModel's
+    # `.json` files have meaningful parameter names, so this is not done for them.
+    if definition.source.lower().endswith('.json'):
+        return None
     for parameter, reference in definition.textures.items():
         name = _asset_name(reference).lower()
         if name.endswith(_SLOT_SUFFIXES[slot]):
             path = finder.find_texture(reference)
-            if path is not None:
+            if path is not None and not finder.is_placeholder(path):
                 return path
     return None
 
 
 _MATERIAL_PREFIXES = ('m', 'mi', 'mii', 'mic', 'mat', 'mt', 'material', 'mtl')
+# Tokens that mark variants of a material (e.g., costume variants, visibility groups).
+_VARIANT_TOKENS = {'cv', 'hidea', 'hideb', 'hidec', 'hided', 'shidea', 'shideb', 'shidec', 'shided', 'gpa', 'gpb',
+                   'gpc', 'gpd', 'inst', 'instance', 'lod', 'lod0', 'lod1', 'd'}
 _IGNORED_TOKENS = {'cv', 'inst', 'instance', 'mat', 'material', 'lod', 'lod0', 't', 'tex', 'texture'}
 
 
@@ -413,6 +508,19 @@ def _find_textures_by_name(finder: MaterialTextureFinder, material_name: str) ->
     return result
 
 
+def _is_same_texture_family(a: Path, b: Path) -> bool:
+    """
+    Returns True if the two textures belong to the same asset (e.g., `T_Hero_body_AO` & `T_Hero_body_D`), i.e.,
+    they share their name up to the last token, or at least their first two tokens (e.g., `T_Hero_00_hair_AO` &
+    `T_Hero_00_body_D`).
+    """
+    ta = [t for t in _tokens(a.stem) if t not in ('t', 'tex', 'tx')]
+    tb = [t for t in _tokens(b.stem) if t not in ('t', 'tex', 'tx')]
+    if ta[:-1] and ta[:-1] == tb[:-1]:
+        return True
+    return len(ta) >= 3 and len(tb) >= 3 and ta[:2] == tb[:2]
+
+
 def _image_has_alpha(image: bpy.types.Image) -> bool:
     if image is None or image.channels < 4 or image.depth not in (32, 64, 128):
         return False
@@ -441,7 +549,25 @@ def setup_material(material: Material, finder: MaterialTextureFinder) -> bool:
                 textures[slot] = path
     if 'base_color' not in textures:
         for slot, path in _find_textures_by_name(finder, material.name).items():
-            textures.setdefault(slot, path)
+            if not finder.is_placeholder(path):
+                textures.setdefault(slot, path)
+    # Secondary textures (normal maps, packed masks, opacity) must either belong to the same asset family as the base
+    # color texture, or be named for their purpose (e.g., `_N` for normal maps). Materials often have placeholder
+    # textures (e.g., test patterns) assigned to their unused slots.
+    for slot in ('normal', 'orm', 'mrao', 'opacity'):
+        if slot not in textures:
+            continue
+        path = textures[slot]
+        if not path.stem.lower().endswith(_SLOT_SUFFIXES[slot]) and \
+                ('base_color' not in textures or not _is_same_texture_family(path, textures['base_color'])):
+            del textures[slot]
+    # Emissive & AO textures are only used if they belong to the same asset family as the base color texture (e.g.
+    # `T_Hero_body_AO` for `T_Hero_body_D`). Materials often reference shared effect textures (e.g., glows that are
+    # only enabled at runtime) that would make the whole material glow.
+    for slot in ('emissive', 'ao'):
+        if slot in textures and ('base_color' not in textures or
+                                 not _is_same_texture_family(textures[slot], textures['base_color'])):
+            del textures[slot]
     if not textures:
         return False
 
@@ -488,6 +614,23 @@ def setup_material(material: Material, finder: MaterialTextureFinder) -> bool:
                 material[ALPHA_CANDIDATE_PROPERTY] = blend_mode
             # Show the texture in the viewport's solid mode as well.
             nodes.active = node
+
+    if 'ao' in textures and 'base_color' in textures:
+        base_node = nodes.get(BASE_COLOR_NODE_NAME)
+        node, _ = image_node(textures['ao'], True)
+        if node is not None and base_node is not None:
+            # Multiply the base color by the ambient occlusion.
+            multiply = nodes.new('ShaderNodeMix')
+            multiply.data_type = 'RGBA'
+            multiply.blend_type = 'MULTIPLY'
+            multiply.name = 'PSK Ambient Occlusion'
+            multiply.label = 'Ambient Occlusion'
+            multiply.inputs['Factor'].default_value = 1.0
+            multiply.location = (-200, base_node.location.y)
+            # NOTE: The color sockets of the mix node are A (6), B (7) and Result (2).
+            links.new(base_node.outputs['Color'], multiply.inputs[6])
+            links.new(node.outputs['Color'], multiply.inputs[7])
+            links.new(multiply.outputs[2], bsdf.inputs['Base Color'])
 
     if 'opacity' in textures:
         node, _ = image_node(textures['opacity'], True)

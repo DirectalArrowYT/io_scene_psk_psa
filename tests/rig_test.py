@@ -18,7 +18,10 @@ SHREK_PSA_FILEPATH = 'tests/data/Shrek.psa'
 SARGE_FILEPATH = 'tests/data/CS_Sarge_S0_Skelmesh.pskx'
 UE_MANNEQUIN_FILEPATH = 'tests/data/SK_1033_1033001.pskx'
 SWORD_FILEPATH = 'tests/data/WEP_BroadSword_SKEL.psk'
-TEST_MODEL_DIRECTORY = 'Test Model Anim'
+TEST_MODEL_DIRECTORY = 'Player/Pl13'
+TEST_MODEL_PSK = os.path.join(TEST_MODEL_DIRECTORY, 'Model', 'Pl13_101', 'Mesh', 'SK_pl13_101', 'SK_Pl13_101.psk')
+TEST_MODEL_ANIMATIONS = os.path.join(TEST_MODEL_DIRECTORY, 'Animation')
+UR_MODEL_PSK = 'Player/Ch013/Model/Default/Mesh/SK_Ch013_Default_00.psk'
 
 
 @pytest.fixture(autouse=True)
@@ -236,7 +239,11 @@ def test_make_animate_ready_converts_existing_actions():
 
 def _write_png(path: Path, color=(1.0, 0.0, 0.0, 1.0)):
     image = bpy.data.images.new(path.stem, 4, 4, alpha=True)
-    image.pixels = list(color) * 16
+    # A gradient (solid color textures are treated as placeholders).
+    pixels = []
+    for i in range(16):
+        pixels.extend((color[0] * i / 15, color[1], color[2], color[3]))
+    image.pixels = pixels
     image.filepath_raw = str(path)
     image.file_format = 'PNG'
     image.save()
@@ -294,14 +301,14 @@ def test_test_model_full_workflow():
     and export it again. The exported animation must match the original.
     """
     from io_scene_psk_psa.psa.builder import PsaBuildOptions, PsaBuildSequence, build_psa
-    psk_filepath = os.path.join(TEST_MODEL_DIRECTORY, 'Mesh', 'SK_pl02_100.psk')
-    psa_filepath = os.path.join(TEST_MODEL_DIRECTORY, 'Animations', 'cp002_CustomPoseEnd00.psa')
+    psk_filepath = TEST_MODEL_PSK
+    psa_filepath = os.path.join(TEST_MODEL_ANIMATIONS, 'cp', 'cp002_CustomPoseEnd00.psa')
     armature_object = _import_psk(psk_filepath, should_make_animate_ready=True)
 
     # Textures were found for the materials that have them.
     mesh_object = next(o for o in armature_object.children if o.type == 'MESH')
     materials = {m.name: m for m in mesh_object.data.materials}
-    for name in ('MII_Pl02100_face_GPA', 'MII_Pl02100_eye', 'MII_Pl02100_hair', 'MII_Pl02100_neck'):
+    for name in ('MII_Pl13101_body', 'MII_Pl13100_face', 'MII_Pl13100_eye_GPD', 'MII_Pl13100_hairB_ShideC', 'MII_Pl13100_neck'):
         assert any(n.type == 'TEX_IMAGE' and n.image for n in materials[name].node_tree.nodes), name
 
     reader = PsaReader.from_path(psa_filepath)
@@ -346,7 +353,7 @@ def test_eye_style_aim_for_eyeballs():
 @pytest.mark.skipif(not os.path.isdir(TEST_MODEL_DIRECTORY), reason='Test model not available')
 def test_eye_style_slide_for_flat_irises():
     """The test model has flat irises that slide across the face (the eye bones translate & scale, never rotate)."""
-    psk_filepath = os.path.join(TEST_MODEL_DIRECTORY, 'Mesh', 'SK_pl02_100.psk')
+    psk_filepath = TEST_MODEL_PSK
     armature_object = _import_psk(psk_filepath, should_make_animate_ready=True)
     from io_scene_psk_psa.rig.builder import get_rig_info
     assert get_rig_info(armature_object)['eye_style'] == 'SLIDE'
@@ -366,13 +373,13 @@ def test_eye_style_slide_for_flat_irises():
 @pytest.mark.skipif(not os.path.isdir(TEST_MODEL_DIRECTORY), reason='Test model not available')
 def test_face_presets_from_psa():
     from io_scene_psk_psa.rig import face_presets
-    psk_filepath = os.path.join(TEST_MODEL_DIRECTORY, 'Mesh', 'SK_pl02_100.psk')
+    psk_filepath = TEST_MODEL_PSK
     armature_object = _import_psk(psk_filepath, should_make_animate_ready=True)
-    directory = os.path.join(TEST_MODEL_DIRECTORY, 'Animations', 'fa')
-    filepaths = [os.path.join(directory, f) for f in ('fa100_FaceEyeClose001.psa', 'AM_FaceLipClose.psa', 'AM_FaceLipLoop.psa')]
+    directory = os.path.join(TEST_MODEL_ANIMATIONS, 'fa')
+    filepaths = [os.path.join(directory, f) for f in ('AM_fa100_FaceEyeClose001.psa', 'AM_FaceLipClose.psa', 'AM_FaceLipLoop.psa')]
     presets = face_presets.import_face_presets(bpy.context, armature_object, filepaths)
     names = {p.name for p in presets}
-    assert names == {'Face: fa100_FaceEyeClose001', 'Face: AM_FaceLipClose', 'Face: AM_FaceLipLoop'}
+    assert names == {'Face: AM_fa100_FaceEyeClose001', 'Face: AM_FaceLipClose', 'Face: AM_FaceLipLoop'}
     assert not any(a.name.startswith('__psk_face_preset_tmp__') for a in bpy.data.actions)
     face_bones = set(face_presets.get_face_bones(armature_object))
     for preset in presets:
@@ -383,7 +390,7 @@ def test_face_presets_from_psa():
     pose_bones = armature_object.pose.bones
     bpy.context.view_layer.update()
     gap = pose_bones['LT_eyelid_C'].head.z - pose_bones['LU_eyelid_B'].head.z
-    face_presets.apply_face_preset(armature_object, bpy.data.actions['Face: fa100_FaceEyeClose001'], insert_keys=True)
+    face_presets.apply_face_preset(armature_object, bpy.data.actions['Face: AM_fa100_FaceEyeClose001'], insert_keys=True)
     bpy.context.view_layer.update()
     assert pose_bones['LT_eyelid_C'].head.z - pose_bones['LU_eyelid_B'].head.z < gap * 0.5
     face_presets.reset_face(armature_object)
@@ -401,3 +408,47 @@ def test_face_preset_from_pose():
     assert jaw.location.length == 0.0
     face_presets.apply_face_preset(armature_object, preset, factor=0.5)
     assert (jaw.location - Vector((0.05, 0.1, 0.15))).length < 1e-5
+
+
+def _material_images(material) -> set[str]:
+    if not material.use_nodes:
+        return set()
+    return {n.image.name for n in material.node_tree.nodes if n.type == 'TEX_IMAGE' and n.image}
+
+
+@pytest.mark.skipif(not os.path.isdir(TEST_MODEL_DIRECTORY), reason='Test model not available')
+def test_material_setup_game_folder_layout():
+    """
+    The meshes are nested (`Model/<Id>/Mesh/<Mesh>/x.psk`), the material files & textures are in the `Mat` & `Tex`
+    folders of other models, and costume variants (`_CV`) have no material files of their own.
+    """
+    before = set(bpy.data.objects)
+    assert bpy.ops.psk.import_file(filepath=TEST_MODEL_PSK.replace('Pl13_101', 'Pl13_100').replace('SK_Pl13_101', 'SK_Pl13_100').replace('SK_pl13_101', 'SK_pl13_100'), components='MESH') == {'FINISHED'}
+    mesh_object = next(o for o in set(bpy.data.objects) - before if o.type == 'MESH')
+    materials = {m.name: m for m in mesh_object.data.materials}
+    expected = {
+        'MII_Pl13100_face': {'T_Pl13_101_face_D.png'},
+        'MII_Pl13100_body_CV': {'T_Pl13_001_body_D.png'},  # Costume variant of `MII_Pl13101_body`.
+        'MII_Pl13100_parts_CV': {'T_Pl13_101_parts_D.png'},
+        'MII_Pl13100_eye_GPD': {'T_Pl13_001_eye_D.png'},
+        'MII_Pl13100_hairA_hideA': {'T_Pl13_001_hair_D.png'},
+        'MII_Pl13100_googgle': {'T_Pl13_001_goggles_D.png'},
+    }
+    for name, images in expected.items():
+        # Placeholder textures (e.g., `T_pl_com_alphatest_D` in the normal map slots) are not used.
+        assert _material_images(materials[name]) == images, name
+
+
+@pytest.mark.skipif(not os.path.isfile(UR_MODEL_PSK), reason='Test model not available')
+def test_material_setup_ambient_occlusion():
+    before = set(bpy.data.objects)
+    assert bpy.ops.psk.import_file(filepath=UR_MODEL_PSK, components='MESH') == {'FINISHED'}
+    mesh_object = next(o for o in set(bpy.data.objects) - before if o.type == 'MESH')
+    materials = {m.name: m for m in mesh_object.data.materials}
+    body = materials['MII_Ch013_Default_00_body_D']
+    assert _material_images(body) == {'T_Ch013_Default_00_body_D.png', 'T_Ch013_Default_00_body_AO.png'}
+    assert body.node_tree.nodes.get('PSK Ambient Occlusion') is not None
+    # The eye uses a placeholder (black) AO texture & shared effect textures for emission, which are not used.
+    assert _material_images(materials['MII_Ch013_Default_00_eye_D']) == {'T_Ch013_Default_00_eye_D.png'}
+    # The outline texture of the face is not used.
+    assert _material_images(materials['MII_Ch013_Default_00_face_D']) == {'T_Ch013_Default_00_face_D.png'}
