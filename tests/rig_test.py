@@ -143,6 +143,53 @@ def test_fix_bone_tails_psa_export_matches():
         assert max(abs(x - y) for x, y in zip(k1.location, k2.location)) < 1e-2
 
 
+def _build_psa(armature_object, action, sequence_name: str):
+    from io_scene_psk_psa.psa.builder import PsaBuildOptions, PsaBuildSequence, build_psa
+    options = PsaBuildOptions()
+    options.armature_objects = [armature_object]
+    options.animation_data = armature_object.animation_data
+    sequence = PsaBuildSequence(armature_object, armature_object.animation_data)
+    sequence.name = sequence_name
+    sequence.nla_state.action = action
+    sequence.nla_state.frame_start, sequence.nla_state.frame_end = (int(x) for x in action.frame_range)
+    options.sequences = [sequence]
+    return build_psa(bpy.context, options)
+
+
+@pytest.mark.parametrize('should_fix_bone_orientation', [False, True])
+def test_psa_export_scale_keys_round_trip(tmp_path, should_fix_bone_orientation):
+    """Scaled bones are exported as scale keys, and importing the PSA again gives the same animation."""
+    from psk_psa_py.psa.writer import write_psa_to_file
+    sequence_name = _first_sequence_name(SHREK_PSA_FILEPATH)
+    armature_object = _import_psk(SHREK_PSK_FILEPATH, should_fix_bone_orientation=should_fix_bone_orientation)
+    action = _import_sequence(armature_object, SHREK_PSA_FILEPATH, sequence_name)
+    frame_start, frame_end = (int(x) for x in action.frame_range)
+
+    # Without scaled bones, no scale keys are written.
+    assert len(_build_psa(armature_object, action, sequence_name).scale_keys) == 0
+
+    # Scale an arm (animated) & the bone above it.
+    pose = armature_object.pose.bones
+    upper = pose['body_l_shoulder_joint']
+    for pose_bone, frame, scale in ((upper, frame_start, 1.0), (upper, frame_end, 1.6),
+                                    (upper.children[0], frame_start, 0.7), (upper.parent, frame_start, 1.25)):
+        pose_bone.scale = (scale, scale, scale)
+        pose_bone.keyframe_insert('scale', frame=frame)
+    psa = _build_psa(armature_object, action, sequence_name)
+    assert len(psa.scale_keys) == len(psa.keys)
+    index = [b.name.decode('windows-1252') for b in psa.bones].index(upper.name)
+    last_frame_scale = list(psa.scale_keys[len(psa.keys) - len(psa.bones) + index].data)
+    assert max(abs(x - 1.6) for x in last_frame_scale) < 1e-3
+
+    filepath = str(tmp_path / 'scaled.psa')
+    write_psa_to_file(psa, filepath, write_scale_keys=True)
+    reimported_object = _import_psk(SHREK_PSK_FILEPATH, should_fix_bone_orientation=should_fix_bone_orientation)
+    _import_sequence(reimported_object, filepath, sequence_name)
+    for frame in range(frame_start, frame_end + 1, max(1, (frame_end - frame_start) // 4)):
+        bpy.context.scene.frame_set(frame)
+        assert _max_difference(_skinning_matrices(armature_object), _skinning_matrices(reimported_object)) < 1e-2, f'Frame {frame}'
+
+
 @pytest.mark.parametrize('filepath', [SHREK_PSK_FILEPATH, SARGE_FILEPATH, UE_MANNEQUIN_FILEPATH])
 def test_animate_ready_rig(filepath):
     armature_object = _import_psk(filepath, should_make_animate_ready=True)
@@ -217,6 +264,311 @@ def test_animate_ready_bake_ik_to_fk_and_remove():
     assert not any(c.name.startswith('PSKRig') for pb in armature_object.pose.bones for c in pb.constraints)
     bpy.context.scene.frame_set(0)
     assert _max_difference(ik_pose, _skinning_matrices(armature_object)) < 1e-2
+
+
+def _ik_limbs(info: dict):
+    for limb in info['arms'].values():
+        yield limb, limb['hand'], limb['ik'], limb['ik']
+    for limb in info['legs'].values():
+        yield limb, limb['foot'], limb['target'], limb['ik']
+
+
+def _bend_ik_limbs(armature_object, info: dict):
+    """Moves the IK controls toward the shoulders/hips so that the IK targets stay within reach when scaling."""
+    pose = armature_object.pose.bones
+    bpy.context.view_layer.update()
+    for limb, end, target, control in _ik_limbs(info):
+        matrix = pose[control].matrix.copy()
+        matrix.translation += (pose[limb['upper']].head - pose[end].head) * 0.4
+        pose[control].matrix = matrix
+    bpy.context.view_layer.update()
+
+
+def _assert_ik_follows_scale(armature_object, info: dict):
+    pose = armature_object.pose.bones
+    bpy.context.view_layer.update()
+    for limb, end, target, control in _ik_limbs(info):
+        upper, lower = pose[limb['upper']], pose[limb['lower']]
+        chain_length = limb['rest_length_a'] + limb['rest_length_b']
+        assert (pose[end].head - pose[target].head).length < chain_length * 1e-3, limb['upper']
+        for pose_bone, scale in ((upper, 1.5), (lower, 0.6), (upper.parent, 1.3)):
+            pose_bone.scale = (scale, scale, scale)
+            bpy.context.view_layer.update()
+            # The limb is scaled, and its end is still on the IK target.
+            assert abs((pose[end].head - lower.head).length + (lower.head - upper.head).length - chain_length) > chain_length * 0.05
+            assert (pose[end].head - pose[target].head).length < chain_length * 1e-3, (limb['upper'], pose_bone.name)
+            pose_bone.scale = (1.0, 1.0, 1.0)
+
+
+@pytest.mark.parametrize('filepath', [SHREK_PSK_FILEPATH, UE_MANNEQUIN_FILEPATH])
+def test_animate_ready_ik_follows_bone_scale(filepath):
+    """The hands & feet stay on the IK targets when the limb bones (or the bones above them) are scaled."""
+    from io_scene_psk_psa.rig.builder import get_rig_info
+    armature_object = _import_psk(filepath, should_make_animate_ready=True)
+    info = get_rig_info(armature_object)
+    assert info['arms'] and info['legs']
+    _bend_ik_limbs(armature_object, info)
+    _assert_ik_follows_scale(armature_object, info)
+
+
+def test_animate_ready_upgrade_rig():
+    """A rig made before the IK followed the bone scale is updated in place."""
+    from io_scene_psk_psa.rig.builder import RIG_INFO_PROPERTY, get_rig_info, is_rig_outdated, upgrade_rig
+    armature_object = _import_psk(UE_MANNEQUIN_FILEPATH, should_make_animate_ready=True)
+    info = get_rig_info(armature_object)
+    assert not is_rig_outdated(armature_object) and not upgrade_rig(armature_object)
+    # Turn the rig into an old one: no scale info & the old (fixed length) IK driver.
+    info['version'] = 1
+    pose = armature_object.pose.bones
+    for limb, _, target, _ in _ik_limbs(info):
+        del limb['scale_parent'], limb['scale_axes']
+        mch_upper = pose[limb['mch_upper']]
+        for index in range(3):
+            mch_upper.driver_remove('scale', index)
+        mch_upper.scale = (1.0, 1.0, 1.0)
+        driver = mch_upper.driver_add('rotation_euler', 0).driver
+        for name in 'ul':
+            driver.variables.remove(driver.variables[name])
+        s = driver.variables['s']
+        s.targets[0].bone_target = ''
+        s.targets[0].transform_type = 'SCALE_X'
+        driver.expression = ('acos(min(max((a * a + (d / s) * (d / s) - b * b) / max(2.0 * a * (d / s), 1e-9), -1.0), 1.0))'
+                             f' - {limb["rest_angle"]:.9f}')
+    armature_object.data[RIG_INFO_PROPERTY] = json.dumps(info)
+    _bend_ik_limbs(armature_object, info)
+    with pytest.raises(AssertionError):
+        _assert_ik_follows_scale(armature_object, info)
+    for pose_bone in pose:
+        pose_bone.scale = (1.0, 1.0, 1.0)
+
+    # Without a context, only the updates that don't add bones are made.
+    assert is_rig_outdated(armature_object) and upgrade_rig(armature_object)
+    assert get_rig_info(armature_object)['version'] == 2
+    _assert_ik_follows_scale(armature_object, get_rig_info(armature_object))
+
+
+def test_animate_ready_bake_fk_to_ik_with_scale():
+    """An FK animation with scaled limb bones looks the same on the IK controls, and the IK holds when rescaling."""
+    from io_scene_psk_psa.rig.bake import _MutedRigConstraints
+    from io_scene_psk_psa.rig.builder import get_rig_info
+    sequence_name = _first_sequence_name(SHREK_PSA_FILEPATH)
+    armature_object = _import_psk(SHREK_PSK_FILEPATH, should_make_animate_ready=True)
+    action = _import_sequence(armature_object, SHREK_PSA_FILEPATH, sequence_name, should_bake_to_rig=False)
+    bpy.context.view_layer.objects.active = armature_object
+    info = get_rig_info(armature_object)
+    pose = armature_object.pose.bones
+    frame_start, frame_end = (int(x) for x in action.frame_range)
+    arm = info['arms']['L']
+    for name, scale in ((arm['upper'], 1.4), (arm['lower'], 0.8), (pose[arm['upper']].parent.name, 1.2)):
+        pose[name].scale = (scale, scale, scale)
+        pose[name].keyframe_insert('scale', frame=frame_start)
+    assert bpy.ops.psk_rig.bake_fk_to_ik(limbs='ALL') == {'FINISHED'}
+    assert armature_object['ik_arm_L'] == 1.0
+    # The keyed lengths are those of the unscaled bones.
+    assert abs(armature_object[arm['length_a']] - arm['rest_length_a']) < arm['rest_length_a'] * 0.05
+    for frame in range(frame_start, frame_end + 1, max(1, (frame_end - frame_start) // 4)):
+        bpy.context.scene.frame_set(frame)
+        ik_pose = _skinning_matrices(armature_object)
+        with _MutedRigConstraints(armature_object):
+            bpy.context.view_layer.update()
+            fk_pose = _skinning_matrices(armature_object)
+        bpy.context.view_layer.update()
+        assert _max_difference(ik_pose, fk_pose) < 0.05, f'Frame {frame}'
+
+    # Growing the upper arm afterwards keeps the hand on the IK control (the arm bends more).
+    bpy.context.scene.frame_set(frame_start)
+    pose[arm['upper']].scale = (1.8, 1.8, 1.8)
+    bpy.context.view_layer.update()
+    assert (pose[arm['hand']].head - pose[arm['ik']].head).length < (arm['rest_length_a'] + arm['rest_length_b']) * 1e-3
+
+
+def _finger_chains(armature_object, hand: dict) -> dict[str, list[str]]:
+    """The finger bones driven by each finger control of a hand, from the base of the finger to its tip."""
+    chains = {}
+    for kind, control in hand['fingers'].items():
+        chains[kind] = [pb.name for pb in armature_object.pose.bones
+                        if any(c.name.startswith('PSKRig Finger Curl') and c.subtarget == control for c in pb.constraints)]
+    return chains
+
+
+def test_animate_ready_finger_sliders():
+    """The fingers are posed with sliders over the back of the hand, and the thumb with a 2D pad."""
+    from io_scene_psk_psa.rig.builder import get_rig_info
+    armature_object = _import_psk(UE_MANNEQUIN_FILEPATH, should_make_animate_ready=True)
+    info = get_rig_info(armature_object)
+    pose = armature_object.pose.bones
+    assert set(info['hands'].keys()) == {'L', 'R'}
+    for side, hand in info['hands'].items():
+        travel = hand['travel']
+        chains = _finger_chains(armature_object, hand)
+        assert {'thumb', 'index', 'middle', 'ring', 'pinky'} <= set(chains.keys())
+        wrist = pose[info['arms'][side]['hand']]
+
+        def tips() -> dict[str, Vector]:
+            bpy.context.view_layer.update()
+            return {kind: pose[bones[-1]].tail.copy() for kind, bones in chains.items()}
+
+        def reach(positions: dict[str, Vector], kind: str) -> float:
+            return (positions[kind] - wrist.head).length
+
+        rest = tips()
+        curl, spread = pose[hand['curl']], pose[hand['spread']]
+
+        # Curl: toward the fingertips makes a fist, toward the wrist bends the fingers back. The sliders stop at the
+        # ends of their tracks.
+        curl.location.y = travel
+        fist = tips()
+        curl.location.y = travel * 10.0
+        assert max((fist[k] - v).length for k, v in tips().items()) < 1e-4
+        curl.location.y = travel * 0.2
+        curled = tips()
+        curl.location.y = -travel * 0.2
+        opened = tips()
+        curl.location.y = 0.0
+        for kind in chains:
+            assert reach(fist, kind) < reach(rest, kind) * 0.9, kind
+            # Sliding the other way bends the finger the other way.
+            assert (opened[kind] - rest[kind]).dot(curled[kind] - rest[kind]) < 0.0, kind
+
+        # A finger's own slider only curls that finger.
+        pose[hand['fingers']['index']].location.y = travel
+        index_curled = tips()
+        pose[hand['fingers']['index']].location.y = 0.0
+        assert reach(index_curled, 'index') < reach(rest, 'index') * 0.9
+        assert all((index_curled[k] - rest[k]).length < 1e-4 for k in chains if k != 'index')
+
+        # Spread.
+        spread.location.y = travel
+        spread_out = tips()
+        spread.location.y = -travel
+        spread_in = tips()
+        spread.location.y = 0.0
+        gap = lambda positions: (positions['index'] - positions['pinky']).length
+        assert gap(spread_out) > gap(rest) > gap(spread_in)
+
+        # The thumb pad: along the hand curls the thumb, across the hand swings it in (toward the fingers) & out.
+        thumb = pose[hand['thumb']]
+        assert pose[hand['thumb_pad']].bone.hide_select
+        thumb.location.y = travel
+        assert reach(tips(), 'thumb') < reach(rest, 'thumb')
+        thumb.location.y = 0.0
+        knuckle = pose[chains['middle'][0]].head
+        inward = 1.0 if thumb.bone.matrix_local.col[0].xyz.dot(knuckle - thumb.bone.head_local) > 0.0 else -1.0
+        thumb.location.x = travel * inward
+        swung_in = tips()
+        thumb.location.x = -travel * inward
+        swung_out = tips()
+        thumb.location.x = 0.0
+        assert (swung_in['thumb'] - knuckle).length < (rest['thumb'] - knuckle).length < (swung_out['thumb'] - knuckle).length
+        assert all((swung_in[k] - rest[k]).length < 1e-4 for k in chains if k != 'thumb')
+
+
+def test_animate_ready_foot_roll_control():
+    """Rotating the foot roll control forward lifts the heel (the toes stay down), rotating it back lifts the toes."""
+    from io_scene_psk_psa.rig.builder import get_rig_info
+    armature_object = _import_psk(UE_MANNEQUIN_FILEPATH, should_make_animate_ready=True)
+    info = get_rig_info(armature_object)
+    pose = armature_object.pose.bones
+    for side, leg in info['legs'].items():
+        assert leg['toe'] is not None
+        roll, foot, toe = pose[leg['roll_ctrl']], pose[leg['foot']], pose[leg['toe']]
+        bpy.context.view_layer.update()
+        ankle, ball = foot.head.copy(), toe.head.copy()
+        length = (ball - ankle).length
+        roll.rotation_euler.x = 0.6
+        bpy.context.view_layer.update()
+        assert foot.head.z > ankle.z + length * 0.1 and (toe.head - ball).length < length * 0.02
+        # The foot roll slider in the panel adds to the control (the ankle rolls further over the ball).
+        rolled = (foot.head - ankle).length
+        armature_object[leg['roll_prop']] = 0.25
+        armature_object.update_tag()
+        bpy.context.view_layer.update()
+        assert (foot.head - ankle).length > rolled + length * 0.1 and (toe.head - ball).length < length * 0.02
+        armature_object[leg['roll_prop']] = 0.0
+        armature_object.update_tag()
+        roll.rotation_euler.x = -0.6
+        bpy.context.view_layer.update()
+        assert toe.head.z > ball.z + length * 0.1
+        roll.rotation_euler.x = 0.0
+
+
+def test_animate_ready_update_rig_adds_foot_roll():
+    """Updating an older rig adds the foot roll controls, and keeps the other controls & their keys."""
+    from io_scene_psk_psa.rig.builder import (RIG_INFO_PROPERTY, RigOptions, _add_foot_roll_drivers, build_rig,
+                                              get_rig_info, is_rig_outdated)
+    armature_object = _import_psk(UE_MANNEQUIN_FILEPATH)
+    options = RigOptions()
+    options.use_fingers = False
+    build_rig(bpy.context, armature_object, options)
+    bpy.context.view_layer.objects.active = armature_object
+
+    # Turn the rig into an older one: no foot roll controls.
+    info = get_rig_info(armature_object)
+    info['version'] = 2
+    removed = []
+    for leg in info['legs'].values():
+        removed.append(leg.pop('roll_ctrl'))
+        _add_foot_roll_drivers(armature_object, leg)
+    bpy.ops.object.mode_set(mode='EDIT')
+    for name in removed:
+        armature_object.data.edit_bones.remove(armature_object.data.edit_bones[name])
+    bpy.ops.object.mode_set(mode='POSE')
+    armature_object.data[RIG_INFO_PROPERTY] = json.dumps(info)
+
+    hand_ik = armature_object.pose.bones['CTRL-hand_ik.L']
+    hand_ik.location.z += 5.0
+    hand_ik.keyframe_insert('location', frame=1)
+    bpy.context.view_layer.update()
+    before = _skinning_matrices(armature_object)
+
+    assert is_rig_outdated(armature_object)
+    assert bpy.ops.psk_rig.update() == {'FINISHED'}
+    assert not is_rig_outdated(armature_object)
+    info = get_rig_info(armature_object)
+    pose = armature_object.pose.bones
+    assert all(leg['roll_ctrl'] in pose for leg in info['legs'].values())
+    assert not info.get('hands')
+    bpy.context.view_layer.update()
+    assert _max_difference(before, _skinning_matrices(armature_object)) < 1e-4
+    action = armature_object.animation_data.action
+    assert any('CTRL-hand_ik.L' in fcurve.data_path for layer in action.layers for strip in layer.strips
+               for channelbag in strip.channelbags for fcurve in channelbag.fcurves)
+    leg = info['legs']['L']
+    ankle = pose[leg['foot']].head.copy()
+    pose[leg['roll_ctrl']].rotation_euler.x = 0.6
+    bpy.context.view_layer.update()
+    assert pose[leg['foot']].head.z > ankle.z
+
+
+def test_animate_ready_update_rig_converts_finger_keys():
+    """The keys of the old finger controls (scale to curl, rotate to spread) are moved onto the finger sliders."""
+    from io_scene_psk_psa.rig.builder import FINGER_SPREAD_MAX_ANGLE, _convert_finger_control_keys
+    from io_scene_psk_psa.shared.compat import action_ensure_channelbag_for_slot, action_ensure_slot, channelbag_ensure_fcurve
+    action = bpy.data.actions.new('fingers')
+    channelbag = action_ensure_channelbag_for_slot(action, action_ensure_slot(action, 'OBJECT', 'Armature'))
+    for path, index, values in (('pose.bones["CTRL-fingers.L"].scale', 1, (1.0, 0.0)),
+                                ('pose.bones["CTRL-fingers.L"].scale', 0, (1.0, 1.0)),
+                                ('pose.bones["CTRL-fingers.L"].rotation_euler', 2, (0.0, FINGER_SPREAD_MAX_ANGLE / 2)),
+                                ('pose.bones["CTRL-finger_index.L"].scale', 1, (1.0, 2.0)),
+                                ('pose.bones["CTRL-finger_index.L"].location', 1, (0.0, 0.0)),
+                                ('pose.bones["CTRL-hand_ik.L"].location', 1, (0.0, 3.0))):
+        fcurve = channelbag_ensure_fcurve(channelbag, path, index=index, group_name='x')
+        for frame, value in enumerate(values):
+            fcurve.keyframe_points.insert(frame, value)
+    travel = 0.5
+    _convert_finger_control_keys({
+        ('CTRL-fingers.L', 'scale', 1): ('CTRL-fingers_curl.L', -travel, travel),
+        ('CTRL-fingers.L', 'rotation_euler', 2): ('CTRL-fingers_spread.L', travel / FINGER_SPREAD_MAX_ANGLE, 0.0),
+        ('CTRL-finger_index.L', 'scale', 1): ('CTRL-finger_index.L', -travel, travel),
+    }, {'CTRL-fingers.L', 'CTRL-finger_index.L'})
+    keys = {(fcurve.data_path, fcurve.array_index): [round(k.co.y, 5) for k in fcurve.keyframe_points]
+            for fcurve in channelbag.fcurves}
+    assert keys == {
+        ('pose.bones["CTRL-fingers_curl.L"].location', 1): [0.0, travel],            # Rest, then a fist.
+        ('pose.bones["CTRL-fingers_spread.L"].location', 1): [0.0, travel / 2],
+        ('pose.bones["CTRL-finger_index.L"].location', 1): [0.0, -travel],           # Rest, then bent back.
+        ('pose.bones["CTRL-hand_ik.L"].location', 1): [0.0, 3.0],
+    }
 
 
 def test_make_animate_ready_converts_existing_actions():
@@ -352,10 +704,11 @@ def test_thumb_curls_across_the_palm():
         palm_centre = (bones[f'{side}_middlefinger_A'].head_local + bones[f'{side}_littlefinger_A'].head_local) / 2
         bpy.context.view_layer.update()
         rest = (pose_bones[f'{side}_thumbfinger_C'].tail - palm_centre).length
-        pose_bones[f'CTRL-fingers.{side}'].scale.y = 0.0
+        curl = pose_bones[f'CTRL-fingers_curl.{side}']
+        curl.location.y = 1e6  # Limited to the end of the slider's track (a fist).
         bpy.context.view_layer.update()
         curled = (pose_bones[f'{side}_thumbfinger_C'].tail - palm_centre).length
-        pose_bones[f'CTRL-fingers.{side}'].scale.y = 1.0
+        curl.location.y = 0.0
         assert curled < rest * 0.8
 
 

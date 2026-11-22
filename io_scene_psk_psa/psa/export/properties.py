@@ -242,6 +242,13 @@ class PsaExportMixin(PropertyGroup, TransformMixin, ExportSpaceMixin, PsxBoneExp
         items=sampling_mode_items,
         default='INTERPOLATED'
     )
+    should_export_scale_keys: BoolProperty(
+        name='Scale Keys',
+        options=set(),
+        default=True,
+        description='Export the scale of the bones. The scale keys are a non-standard part of the PSA format (also '
+                    'written by UE Viewer & FModel), and are only written when a bone is scaled'
+    )
     group_source: EnumProperty(
         name='Group Source',
         options=set(),

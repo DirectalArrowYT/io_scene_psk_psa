@@ -17,7 +17,7 @@ For Blender 4.1 and lower, see [Legacy Compatibility](#legacy-compatibility).
 * [Collection Exporters](https://docs.blender.org/manual/en/latest/scene_layout/collections/collections.html#exporters) for reliable, repeatable export workflow.
 * Non-standard model data (.pskx) is supported for import only (vertex normals, extra UV channels, vertex colors, shape keys).
 * Manual re-ordering of material slots on export.
-* Non-standard animation data is supported for import only (scale keys).
+* Bone scale is imported and exported as scale keys (non-standard animation data, as written by UE Viewer & FModel). On export, the scale keys are only written when a bone is scaled (**Scale Keys** export option).
 * Fine-grained PSA sequence importing for efficient workflow when working with large PSA files.
 * PSA sequence metadata (e.g., frame rate) is preserved on import, allowing this data to be reused on export.
 * PSA sequences can be exported directly from actions or delineated using a scene's [timeline markers](https://docs.blender.org/manual/en/latest/animation/markers.html), pose markers, or NLA track strips, allowing direct use of the [NLA](https://docs.blender.org/manual/en/latest/editors/nla/index.html) when creating sequences.
@@ -50,16 +50,18 @@ Tick **Animate Ready** when importing a PSK (or use **Make Animate Ready** in th
 
 | Controls | Description |
 |---|---|
-| **Arm & Leg IK** | `CTRL-hand_ik`, `CTRL-foot_ik` & pole targets (`CTRL-elbow_pole`, `CTRL-knee_pole`). The IK is analytic (exact, even for straight limbs). The twist rings (`CTRL-arm_twist`, `CTRL-forearm_twist`, etc.) twist the limbs around their own axis. |
+| **Arm & Leg IK** | `CTRL-hand_ik`, `CTRL-foot_ik` & pole targets (`CTRL-elbow_pole`, `CTRL-knee_pole`). The IK is analytic (exact, even for straight limbs) and follows the scale of the limb bones & the bones above them, so the hands & feet stay on the controls when e.g. an arm is scaled. The twist rings (`CTRL-arm_twist`, `CTRL-forearm_twist`, etc.) twist the limbs around their own axis. |
 | **IK/FK switch** | Per-limb sliders in the `PSK Rig` panel. In FK mode, the deform bones are animated directly. The snap buttons match IK to FK (or vice versa) on the current frame. |
-| **Foot roll** | Per-foot slider. Positive values roll onto the ball of the foot (the heel lifts while the toes bend & stay on the floor), negative values lift the toes. `CTRL-toe` controls the toes. |
-| **Fingers** | Scale `CTRL-fingers` on its Y axis to curl all the fingers (0 = fist, above 1 = open wide) and rotate it on its Z axis to spread the fingers. Each finger also has its own curl control (`CTRL-finger_index`, etc.). |
+| **Foot roll** | Rotate `CTRL-foot_roll` (the arrow behind the heel) forward to roll onto the ball of the foot (the heel lifts while the toes bend & stay on the floor), or back to lift the toes. The per-foot slider in the `PSK Rig` panel does the same and adds to the control. `CTRL-toe` controls the toes. |
+| **Fingers** | A panel of sliders floats over the back of each hand. `CTRL-fingers_curl` & `CTRL-fingers_spread` (near the wrist) curl & spread all the fingers, and each finger has its own curl slider over its knuckle (`CTRL-finger_index`, etc.). Slide toward the fingertips to curl, toward the wrist to straighten & bend back. The thumb has a 2D pad (`CTRL-thumb`) on its side of the hand: along the hand curls it, across the hand swings it in & out. |
 | **Eyes** | `CTRL-eyes` (both eyes) and `CTRL-eye` (per eye). The **Eye Style** is detected from the shape of the eye meshes: **Slide** for flat irises (common in anime-style games), where moving the controls slides the irises across the face and scaling them changes the size of the irises/pupils, or **Aim** for spherical eyeballs, where the controls are targets that the eyes look at. |
 | **Face** | Controls in front of the face: blink (`CTRL-blink`, move down to close the eyelids, up to open them wide), brows (`CTRL-brow`, move to raise/lower, rotate to tilt), mouth corners (`CTRL-mouth_corner`, smile/frown/wide/narrow), lips (`CTRL-lip_upper`/`CTRL-lip_lower`, move up/down & forward to pout), cheeks (`CTRL-cheek`) and jaw (`CTRL-jaw`, move down to open, sideways to shift). The individual facial bones can also be animated directly. |
 
 **Face Presets** (`PSK Rig` sidebar tab): a library of facial expressions. Use the import button to select PSA files (e.g., a game's facial animations such as blinks, smiles or mouth shapes); a preset is created from the most expressive frame of each sequence. Presets can also be saved from the current pose of the face. Select a preset and click **Apply** (or **Apply & Key**) to pose the face, with the **Blend** slider controlling how much of the preset is applied. Presets only affect the facial bones, and are also available as pose assets in Blender's Pose Library.
 
 The finger, eye (slide), and face controls are layered on top of the FK animation, so imported animations look exactly the same while the controls are at rest.
+
+Rigs made with an older version of the add-on are updated with **Update Rig** in the `PSK Rig` panel (the IK scale fix is also applied when the file is opened). The controls and their animation are kept; keys on the old finger controls (scale to curl, rotate to spread) are moved onto the sliders.
 
 **Importing animations onto the rig:** when a PSA is imported onto an armature with the rig, the IK & eye controls are keyed on every frame so that the animation looks exactly as it was authored (**Bake to Rig Controls** import option).
 

@@ -309,7 +309,7 @@ class PSA_OT_export_collection(Operator, ExportHelper, PsaExportMixin):
             self.report({'ERROR_INVALID_CONTEXT'}, str(e))
             return {'CANCELLED'}
 
-        write_psa_to_file(psa, self.filepath)
+        write_psa_to_file(psa, self.filepath, write_scale_keys=True)
 
         return {'FINISHED'}
 
@@ -446,6 +446,7 @@ def draw_sequences_panel(
 
             # SAMPLING MODE
             flow.prop(pg, 'sampling_mode', text='Sampling Mode')
+            flow.prop(pg, 'should_export_scale_keys')
 
             # FPS
             col = flow.row(align=True)
@@ -553,6 +554,7 @@ def create_psa_export_options(context: Context, armature_objects: Sequence[Objec
     options.sequence_name_prefix = pg.sequence_name_prefix
     options.sequence_name_suffix = pg.sequence_name_suffix
     options.sampling_mode = pg.sampling_mode
+    options.should_export_scale_keys = pg.should_export_scale_keys
     options.export_space = pg.export_space
 
     match pg.transform_source:
@@ -700,7 +702,7 @@ class PSA_OT_export(Operator, ExportHelper):
             self.report({'ERROR_INVALID_CONTEXT'}, str(e))
             return {'CANCELLED'}
 
-        write_psa_to_file(psa, self.filepath)
+        write_psa_to_file(psa, self.filepath, write_scale_keys=True)
 
         return {'FINISHED'}
 

@@ -1,6 +1,7 @@
 from typing import cast as typing_cast
 
 import bpy
+from bpy.app.handlers import persistent
 from bpy.props import BoolProperty, EnumProperty
 from bpy.types import Armature, Context, Object, Operator
 from mathutils import Quaternion, Vector
@@ -15,7 +16,7 @@ from .bake import (
     snap_ik_to_fk,
     _reset_pose_bones,
 )
-from .builder import RigOptions, build_rig, get_rig_info, has_rig, remove_rig
+from .builder import RigOptions, build_rig, get_rig_info, has_rig, is_rig_outdated, remove_rig, upgrade_rig
 from .orientation import reorient_armature_bones
 from ..psk.properties import eye_style_items
 
@@ -355,8 +356,47 @@ class PSK_OT_rig_reset_controls(Operator):
         return {'FINISHED'}
 
 
+class PSK_OT_rig_update(Operator):
+    bl_idname = 'psk_rig.update'
+    bl_label = 'Update Rig'
+    bl_description = 'Update a rig made with an older version of the add-on (the controls & their animation are ' \
+                     'kept): the IK follows the scale of the limb bones, the fingers get sliders & a thumb pad, and ' \
+                     'the feet get a foot roll control'
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        obj = _get_armature(context)
+        return obj is not None and is_rig_outdated(obj)
+
+    def execute(self, context):
+        armature_object = _get_armature(context)
+        assert armature_object is not None
+        try:
+            upgrade_rig(armature_object, context)
+        except RuntimeError as e:
+            self.report({'ERROR'}, f'Could not update the rig: {e}')
+            return {'CANCELLED'}
+        self.report({'INFO'}, 'Rig updated')
+        return {'FINISHED'}
+
+
+@persistent
+def _upgrade_rigs_on_load(*_):
+    """Rigs made with an older version of the add-on are updated when a file is opened."""
+    for obj in bpy.data.objects:
+        if obj.type != 'ARMATURE' or obj.library is not None or obj.override_library is not None:
+            continue
+        try:
+            if upgrade_rig(obj):
+                print(f'PSK Rig: updated the rig of "{obj.name}"')
+        except Exception as e:
+            print(f'PSK Rig: could not update the rig of "{obj.name}": {e}')
+
+
 _classes = (
     PSK_OT_rig_make_animate_ready,
+    PSK_OT_rig_update,
     PSK_OT_rig_remove,
     PSK_OT_rig_bake_fk_to_ik,
     PSK_OT_rig_bake_ik_to_fk,
@@ -365,4 +405,16 @@ _classes = (
 )
 
 from bpy.utils import register_classes_factory
-register, unregister = register_classes_factory(_classes)
+_register_classes, _unregister_classes = register_classes_factory(_classes)
+
+
+def register():
+    _register_classes()
+    if _upgrade_rigs_on_load not in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.append(_upgrade_rigs_on_load)
+
+
+def unregister():
+    if _upgrade_rigs_on_load in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.remove(_upgrade_rigs_on_load)
+    _unregister_classes()

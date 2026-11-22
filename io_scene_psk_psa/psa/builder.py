@@ -7,6 +7,10 @@ from mathutils import Matrix, Quaternion, Vector
 from ..shared.helpers import PsxBoneCollection, convert_bpy_quaternion_to_psx_quaternion, convert_vector_to_vector3, create_psx_bones, get_coordinate_system_transform, get_pose_bone_original_matrix
 
 
+# Scales this close to 1 are treated as unscaled.
+SCALE_KEY_EPSILON = 1e-4
+
+
 class PsaBuildSequence:
     class NlaState:
         def __init__(self):
@@ -40,6 +44,8 @@ class PsaBuildOptions:
         self.forward_axis = 'X'
         self.up_axis = 'Z'
         self.sequence_source = 'ACTIONS'  # One of ('ACTIONS', 'TIMELINE_MARKERS', 'NLA_STRIPS')
+        # Write the scale of the bones (a non-standard SCALEKEYS section) when any exported bone is scaled.
+        self.should_export_scale_keys = True
     
     @property
     def bone_collection_primary_key(self) -> str:
@@ -90,14 +96,18 @@ class PsaExportBone:
             attached_bone_matrix = attached_armature.matrix_world @ attached_pose_bone.matrix
         return attached_bone_matrix
 
-def _get_pose_bone_location_and_rotation(
+def _get_pose_bone_transform(
     pose_bone: PoseBone,
     armature_object: Object,
     export_bone: PsaExportBone,
     export_space: str,
     scale: Vector,
     coordinate_system_transform: Matrix,
-) -> Tuple[Vector, Quaternion]:
+) -> Tuple[Vector, Quaternion, Vector]:
+    """
+    Returns the location, rotation & scale of the pose bone relative to its parent. The location is relative to the
+    scaled parent (as in Unreal), so a child of a scaled bone keeps its own location and moves with the parent's scale.
+    """
     # NOTE: The pose matrices are evaluated with the original (i.e., PSK file) bone orientations, so that bones that
     # have been re-oriented in Blender (e.g., to fix the bone tails) are exported correctly.
     if pose_bone.parent is not None:
@@ -142,8 +152,14 @@ def _get_pose_bone_location_and_rotation(
         # TODO: probably remove this?
         location *= scale
         rotation.conjugate()
+        bone_scale = pose_bone_matrix.to_scale()
+    elif export_space == 'ROOT' and not export_bone.is_attached_to_armature:
+        bone_scale = Vector((1.0, 1.0, 1.0))
+    else:
+        # The scale of the armature object is applied to the locations, so it is not part of the root bone's scale.
+        bone_scale = get_pose_bone_original_matrix(pose_bone).to_scale()
 
-    return location, rotation
+    return location, rotation, bone_scale
 
 
 def build_psa(context: Context, options: PsaBuildOptions) -> Psa:
@@ -197,6 +213,9 @@ def build_psa(context: Context, options: PsaBuildOptions) -> Psa:
 
     coordinate_system_transform = get_coordinate_system_transform(options.forward_axis, options.up_axis)
 
+    # Whether any exported bone is scaled on any frame (the scale keys are only written if so).
+    has_scaled_bones = False
+
     for export_sequence_index, export_sequence in enumerate(options.sequences):
         frame_start = export_sequence.nla_state.frame_start
         frame_end = export_sequence.nla_state.frame_end
@@ -245,12 +264,19 @@ def build_psa(context: Context, options: PsaBuildOptions) -> Psa:
         assert context.view_layer
         context.view_layer.update()
 
-        def add_key(location: Vector, rotation: Quaternion):
+        def add_key(location: Vector, rotation: Quaternion, scale: Vector):
+            nonlocal has_scaled_bones
             key = Psa.Key()
             key.location = convert_vector_to_vector3(location)
             key.rotation = convert_bpy_quaternion_to_psx_quaternion(rotation)
             key.time = 1.0 / psa_sequence.fps
             psa.keys.append(key)
+            if options.should_export_scale_keys:
+                scale_key = Psa.ScaleKey()
+                scale_key.scale = convert_vector_to_vector3(scale)
+                scale_key.time = key.time
+                psa.scale_keys.append(scale_key)
+                has_scaled_bones = has_scaled_bones or any(abs(x - 1.0) > SCALE_KEY_EPSILON for x in scale)
 
         armature_scales: dict[Object, Vector] = {}
 
@@ -281,10 +307,10 @@ def build_psa(context: Context, options: PsaBuildOptions) -> Psa:
             case 'INTERPOLATED':
                 # Used as a store for the last frame's pose bone locations and rotations.
                 last_frame: int | None = None
-                last_frame_bone_poses: list[tuple[Vector, Quaternion]] = []
+                last_frame_bone_poses: list[tuple[Vector, Quaternion, Vector]] = []
 
                 next_frame: int | None = None
-                next_frame_bone_poses: list[tuple[Vector, Quaternion]] = []
+                next_frame_bone_poses: list[tuple[Vector, Quaternion, Vector]] = []
 
                 for _ in range(frame_count):
                     if last_frame is None or last_frame != int(frame):
@@ -300,15 +326,14 @@ def build_psa(context: Context, options: PsaBuildOptions) -> Psa:
                             last_frame_bone_poses.clear()
                             context.scene.frame_set(frame=last_frame)
                             for export_bone in export_bones:
-                                location, rotation = _get_pose_bone_location_and_rotation(
+                                last_frame_bone_poses.append(_get_pose_bone_transform(
                                     export_bone.pose_bone,
                                     export_bone.armature_object,
                                     export_bone,
                                     options.export_space,
                                     export_bone.scale,
                                     coordinate_system_transform=coordinate_system_transform
-                                )
-                                last_frame_bone_poses.append((location, rotation))
+                                ))
 
                         next_frame = None
                         next_frame_bone_poses.clear()
@@ -323,26 +348,26 @@ def build_psa(context: Context, options: PsaBuildOptions) -> Psa:
                             next_frame = last_frame + 1
                             context.scene.frame_set(frame=next_frame)
                             for export_bone in export_bones:
-                                location, rotation = _get_pose_bone_location_and_rotation(
+                                next_frame_bone_poses.append(_get_pose_bone_transform(
                                     pose_bone=export_bone.pose_bone,
                                     armature_object=export_bone.armature_object,
                                     export_bone=export_bone,
                                     export_space=options.export_space,
                                     scale=export_bone.scale,
                                     coordinate_system_transform=coordinate_system_transform,
-                                )
-                                next_frame_bone_poses.append((location, rotation))
+                                ))
 
                         factor = frame % 1.0
 
                         for i in range(len(export_bones)):
-                            last_location, last_rotation = last_frame_bone_poses[i]
-                            next_location, next_rotation = next_frame_bone_poses[i]
+                            last_location, last_rotation, last_scale = last_frame_bone_poses[i]
+                            next_location, next_rotation, next_scale = next_frame_bone_poses[i]
 
                             location = last_location.lerp(next_location, factor)
                             rotation = last_rotation.slerp(next_rotation, factor)
+                            scale = last_scale.lerp(next_scale, factor)
 
-                            add_key(location, rotation)
+                            add_key(location, rotation, scale)
 
                     frame += frame_step
             case 'SUBFRAME':
@@ -350,15 +375,14 @@ def build_psa(context: Context, options: PsaBuildOptions) -> Psa:
                     context.scene.frame_set(frame=int(frame), subframe=frame % 1.0)
 
                     for export_bone in export_bones:
-                        location, rotation = _get_pose_bone_location_and_rotation(
+                        add_key(*_get_pose_bone_transform(
                             pose_bone=export_bone.pose_bone,
                             armature_object=export_bone.armature_object,
                             export_bone=export_bone,
                             export_space=options.export_space,
                             scale=export_bone.scale,
                             coordinate_system_transform=coordinate_system_transform,
-                        )
-                        add_key(location, rotation)
+                        ))
 
                     frame += frame_step
 
@@ -376,5 +400,9 @@ def build_psa(context: Context, options: PsaBuildOptions) -> Psa:
     context.scene.frame_set(saved_frame_current)
 
     context.window_manager.progress_end()
+
+    if not has_scaled_bones:
+        # No bone is scaled, so the (non-standard) scale keys are left out of the file.
+        psa.scale_keys.clear()
 
     return psa

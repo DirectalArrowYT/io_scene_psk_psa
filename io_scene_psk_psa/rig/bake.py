@@ -9,7 +9,7 @@ from bpy.types import Action, Armature, Context, Object
 from mathutils import Matrix, Quaternion
 
 from ..shared.compat import action_ensure_channelbag_for_slot, action_ensure_slot, channelbag_ensure_fcurve
-from .builder import CONSTRAINT_PREFIX, get_rig_info, set_rig_property
+from .builder import CONSTRAINT_PREFIX, get_rig_info, set_rig_property, upgrade_rig
 from .orientation import _limb_bend_vector
 
 
@@ -56,6 +56,36 @@ def _set_basis(pose_bone, basis: Matrix):
     else:
         pose_bone.rotation_euler = rotation.to_euler(pose_bone.rotation_mode)
     pose_bone.scale = scale
+
+
+def _unscaled_chain_lengths(armature_object: Object, limb: dict, end: str) -> tuple[float, float]:
+    """
+    The lengths of the two bones of an IK chain in the current pose with the scale of the limb bones & their parents
+    taken out. The IK solver multiplies the lengths by that scale again (see `_add_ik_solver_drivers` in the builder),
+    so that the chain keeps following the bones when they are scaled afterwards.
+    """
+    pose = armature_object.pose.bones
+    upper, lower = pose[limb['upper']], pose[limb['lower']]
+    world = armature_object.matrix_world
+    elbow = world @ lower.head
+    length_a = (elbow - world @ upper.head).length
+    length_b = (world @ pose[end].head - elbow).length
+    parent = pose.get(limb.get('scale_parent') or '')
+    matrix = world @ parent.matrix if parent is not None else world
+    scale = abs(matrix.to_3x3().determinant()) ** (1.0 / 3.0)
+    upper_axis, upper_lower_axis, lower_axis = limb.get('scale_axes', (1, 1, 1))
+    scale_a = scale * abs(upper.scale[upper_axis])
+    scale_b = scale * abs(upper.scale[upper_lower_axis]) * abs(lower.scale[lower_axis])
+    return (length_a / scale_a if scale_a > 1e-9 else limb['rest_length_a'],
+            length_b / scale_b if scale_b > 1e-9 else limb['rest_length_b'])
+
+
+def _upgraded_limbs(armature_object: Object, limbs: list[tuple[str, str, dict]] | None) -> list[tuple[str, str, dict]] | None:
+    """Updates a rig made with an older version of the add-on, and returns the limbs with their up-to-date info."""
+    if not upgrade_rig(armature_object) or limbs is None:
+        return limbs
+    info = get_rig_info(armature_object) or {}
+    return [(kind, side, info['arms' if kind == 'arm' else 'legs'][side]) for kind, side, _ in limbs]
 
 
 def get_rig_limbs(info: dict, sides: Iterable[str] | None = None, kinds: Iterable[str] = ('arm', 'leg')) -> list[tuple[str, str, dict]]:
@@ -169,8 +199,7 @@ def compute_ik_controls_from_fk(armature_object: Object, info: dict, limbs: list
             offset = upper_rest.to_3x3() @ upper_pose.location
             bases[limb['mch_root']] = Matrix.Translation(root_rest.to_3x3().inverted() @ offset)
             bases[limb['mch_lower']] = Matrix.Translation(lower_pose.location)
-            lengths[limb['length_a']] = (lower_pose.head - upper_pose.head).length
-            lengths[limb['length_b']] = (pose[end].head - lower_pose.head).length
+            lengths[limb['length_a']], lengths[limb['length_b']] = _unscaled_chain_lengths(armature_object, limb, end)
         if kind == 'arm':
             solve(limb['ik'], _rigid_follow(pose[limb['hand']].matrix, _rest(armature_object, limb['hand']), _rest(armature_object, limb['ik'])))
             solve_pole(limb, limb['upper'], limb['lower'], limb['hand'])
@@ -179,7 +208,9 @@ def compute_ik_controls_from_fk(armature_object: Object, info: dict, limbs: list
             foot_rest = _rest(armature_object, limb['foot'])
             ik_matrix = _rigid_follow(foot_matrix, foot_rest, _rest(armature_object, limb['ik']))
             solve(limb['ik'], ik_matrix)
-            # The foot roll mechanism is at rest (the foot roll is reset to 0).
+            # The foot roll mechanism is at rest (the foot roll slider & control are reset).
+            if limb.get('roll_ctrl'):
+                bases[limb['roll_ctrl']] = Matrix.Identity(4)
             heel_matrix = _rigid_follow(ik_matrix, _rest(armature_object, limb['ik']), _rest(armature_object, limb['heel']))
             computed[limb['heel']] = heel_matrix
             ball_matrix = _rigid_follow(heel_matrix, _rest(armature_object, limb['heel']), _rest(armature_object, limb['ball']))
@@ -367,6 +398,7 @@ def bake_fk_to_ik(context: Context, armature_object: Object, frame_start: int, f
     Keys the IK (and eye) controls so that they match the FK animation of the active action over the frame range,
     and switches the limbs to IK. Returns the number of frames baked.
     """
+    limbs = _upgraded_limbs(armature_object, limbs)
     info = get_rig_info(armature_object)
     if info is None:
         raise RuntimeError('The armature does not have an Animate Ready rig')
@@ -530,6 +562,8 @@ def bake_ik_to_fk(context: Context, armature_object: Object, frame_start: int, f
             controls.extend(limb[k] for k in ('twist', 'lower_twist', 'mch_root', 'mch_lower') if limb.get(k))
             if kind == 'leg' and limb.get('toe_ctrl'):
                 controls.append(limb['toe_ctrl'])
+            if kind == 'leg' and limb.get('roll_ctrl'):
+                controls.append(limb['roll_ctrl'])
         if include_eyes and eyes:
             controls.append(eyes['parent'])
             controls.extend(item['ctrl'] for item in eyes['items'])
@@ -547,7 +581,7 @@ def bake_ik_to_fk(context: Context, armature_object: Object, frame_start: int, f
                 if limb.get(key):
                     props.add(limb[key])
                     set_rig_property(armature_object, limb[key], limb[f'rest_{key}'])
-        _reset_pose_bones(armature_object, [limb[k] for _, _, limb in limbs for k in ('mch_root', 'mch_lower') if limb.get(k)])
+        _reset_pose_bones(armature_object, [limb[k] for _, _, limb in limbs for k in ('mch_root', 'mch_lower', 'roll_ctrl') if limb.get(k)])
         if include_eyes and eyes:
             props.add(eyes['prop'])
         for fcurve in list(channelbag.fcurves):
@@ -580,6 +614,7 @@ def _autokey(context: Context, armature_object: Object, names: Iterable[str]):
 
 def snap_fk_to_ik(context: Context, armature_object: Object, limbs: list[tuple[str, str, dict]], include_eyes: bool = False):
     """Moves the IK controls to match the current FK pose and switches the limbs to IK."""
+    limbs = _upgraded_limbs(armature_object, limbs)
     info = get_rig_info(armature_object)
     assert info is not None and context.view_layer
     for kind, side, limb in limbs:

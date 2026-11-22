@@ -2,11 +2,11 @@ from bpy.types import Panel
 
 from .builder import (
     COLLECTION_BODY, COLLECTION_FACE, COLLECTION_FACE_CONTROLS, COLLECTION_FINGERS, COLLECTION_HAND, COLLECTION_IK,
-    COLLECTION_MECHANISM, get_rig_info,
+    COLLECTION_MECHANISM, get_rig_info, is_rig_outdated,
 )
 from .operators import (
     PSK_OT_rig_bake_fk_to_ik, PSK_OT_rig_bake_ik_to_fk, PSK_OT_rig_make_animate_ready, PSK_OT_rig_remove,
-    PSK_OT_rig_reset_controls, PSK_OT_rig_snap, _get_armature,
+    PSK_OT_rig_reset_controls, PSK_OT_rig_snap, PSK_OT_rig_update, _get_armature,
 )
 
 SIDE_LABELS = {'L': 'Left', 'R': 'Right'}
@@ -30,6 +30,11 @@ class PSK_PT_rig(Panel):
             layout.label(text='No control rig', icon='INFO')
             layout.operator(PSK_OT_rig_make_animate_ready.bl_idname, icon='ARMATURE_DATA')
             return
+
+        if is_rig_outdated(armature_object):
+            box = layout.box()
+            box.label(text='Made with an older version', icon='ERROR')
+            box.operator(PSK_OT_rig_update.bl_idname, icon='FILE_REFRESH')
 
         # IK/FK switches.
         box = layout.box()
@@ -107,13 +112,15 @@ class PSK_PT_rig_help(Panel):
     def draw(self, context):
         col = self.layout.column(align=True)
         for line in (
-            'Hands: scale Y the hand control to curl',
-            '  the fingers (0 = fist), rotate Z to spread.',
-            '  Scale Y a finger control to curl one finger.',
+            'Hands: slide the Curl & Spread sliders over',
+            '  the back of the hand (toward the fingertips',
+            '  curls), or a finger\'s own slider. Move the',
+            '  thumb pad to curl & swing the thumb.',
             'Arms & legs: move the IK controls & poles.',
             '  Rotate the twist rings to twist the limb.',
-            'Feet: use Foot Roll to roll on the ball of',
-            '  the foot (the toes stay on the floor).',
+            'Feet: rotate the arrow behind the heel (or',
+            '  use Foot Roll) to roll on the ball of the',
+            '  foot (the toes stay on the floor).',
             'Eyes: move the eye target controls.',
             'Face: move the blink, brow, mouth corner,',
             '  lip, cheek & jaw controls in front of',

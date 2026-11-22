@@ -91,6 +91,26 @@ def _shape_data(name: str):
             vertices = [(0, 0, 1), (0.4, 0, 0.6), (-0.4, 0, 0.6), (0, 0, -1), (0.4, 0, -0.6), (-0.4, 0, -0.6)]
             edges = [(0, 3), (0, 1), (0, 2), (3, 4), (3, 5)]
             return vertices, edges
+        case 'foot_arrow':
+            # The foot shape with a chevron at the front, so that it's clear which way the foot points.
+            v, e = _rectangle(1.0, 1.0, corner=0.35)
+            chevron = [(0.0, 0.0, 0.55), (0.3, 0.0, 0.15), (-0.3, 0.0, 0.15), (0.0, 0.0, 0.85)]
+            v, e = _merge((v, e), (chevron, [(0, 3), (1, 3), (2, 3), (1, 2)]))
+            return [(x, z, y) for x, y, z in v], e
+        case 'bone_arrow':
+            # An arrow from the head of the bone (Y = 0) to Y = 1.
+            vertices = [(0, 0, 0), (0, 0.62, 0), (0.18, 0.48, 0), (-0.18, 0.48, 0), (0, 0.48, 0.18), (0, 0.48, -0.18),
+                        (0, 1, 0)]
+            edges = [(0, 1), (1, 2), (1, 3), (1, 4), (1, 5), (2, 6), (3, 6), (4, 6), (5, 6), (2, 4), (4, 3), (3, 5),
+                     (5, 2)]
+            return vertices, edges
+        case 'slider':
+            # A ring around a track with an arrowhead at each end (the bone slides along its Y axis).
+            track = [(0, -1.2, 0), (0, 1.2, 0), (0.2, 0.88, 0), (-0.2, 0.88, 0), (0.2, -0.88, 0), (-0.2, -0.88, 0)]
+            return _merge(_circle(segments=16, radius=0.42), (track, [(0, 1), (1, 2), (1, 3), (0, 4), (0, 5)]))
+        case 'square_flat':
+            # A square on the XY plane (the plane a 2D pad control slides on).
+            return [(-1, -1, 0), (1, -1, 0), (1, 1, 0), (-1, 1, 0)], [(0, 1), (1, 2), (2, 3), (3, 0)]
         case 'fingers':
             # A fan of lines for the finger master control.
             vertices, edges = _rectangle(1.0, 0.25, corner=0.2)
