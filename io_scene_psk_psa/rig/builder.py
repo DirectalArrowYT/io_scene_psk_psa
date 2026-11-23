@@ -25,13 +25,14 @@ from mathutils import Matrix, Vector
 
 from ..shared.helpers import RIG_BONE_PROPERTY, is_rig_bone
 from .orientation import _orientation_matrix, BoneOrientation, get_palm_side_vector, _limb_bend_vector, skeleton_from_bones
-from .skeleton import Skeleton, SkeletonMap, analyze_skeleton
+from .skeleton import Skeleton, SkeletonMap, analyze_skeleton, _is_helper
 from .widgets import get_widget
 
 RIG_INFO_PROPERTY = 'psk_rig_info'
 # Version 2: the IK chains follow the scale of the limb bones & their parents.
 # Version 3: finger sliders & a thumb pad on the hands, and a foot roll control on the feet.
-RIG_VERSION = 3
+# Version 4: the rotation helper bones at the limb joints (e.g., `L_elbow_EX`) follow the joints.
+RIG_VERSION = 4
 CONSTRAINT_PREFIX = 'PSKRig'
 CTRL = 'CTRL-'
 MCH = 'MCH-'
@@ -43,9 +44,10 @@ COLLECTION_MECHANISM = 'Mechanism'
 COLLECTION_BODY = 'Body'
 COLLECTION_FINGERS = 'Fingers'
 COLLECTION_FACE = 'Face'
+COLLECTION_HELPERS = 'Joint Helpers'
 
 RIG_COLLECTIONS = (COLLECTION_IK, COLLECTION_HAND, COLLECTION_FACE_CONTROLS, COLLECTION_MECHANISM)
-DEFORM_COLLECTIONS = (COLLECTION_BODY, COLLECTION_FINGERS, COLLECTION_FACE)
+DEFORM_COLLECTIONS = (COLLECTION_BODY, COLLECTION_FINGERS, COLLECTION_FACE, COLLECTION_HELPERS)
 
 SIDE_COLORS = {'L': 'THEME04', 'R': 'THEME01', 'C': 'THEME09'}
 FACE_COLOR = 'THEME06'
@@ -502,6 +504,151 @@ def _dominant_axis(vector: Vector) -> int:
     return max(range(3), key=lambda i: abs(vector[i]))
 
 
+# How the rotation helper bones at the limb joints follow the joint (in the frame of the joint bone, with Y along the
+# bone). Helper bones (e.g., `L_elbow_EX` in Unreal Engine skeletons) are deform bones that share the parent & the
+# position of a joint and keep the skin around the joint from collapsing. Games drive them at runtime, so animations
+# usually don't key them. The rules were measured from game animations that do key them (Unreal Engine `_EX` bones):
+#   * 'swing': the helper follows the joint without its twist (shoulders & hips).
+#   * 'bend': a fraction of the bend of the joint, without its twist (elbows & knees).
+#   * 'twist': a fraction of the rotation of the joint about the Y axis of the helper (wrists & ankles).
+JOINT_HELPER_RULES = {
+    'upper': ('swing', None),
+    'lower': ('bend', 0.5),
+    'hand': ('twist', 0.5),
+    'foot': ('twist', 0.5),
+}
+
+
+def _find_joint_helpers(skeleton: Skeleton, joint: str) -> list[str]:
+    """The helper bones of a joint: leaf helper bones that share the parent & the head of the joint."""
+    parent = skeleton.parent(joint)
+    if parent is None:
+        return []
+    return [name for name in skeleton.children(parent)
+            if name != joint and _is_helper(name) and not skeleton.children(name)
+            and skeleton.distance(name, joint) <= skeleton.epsilon]
+
+
+def _build_joint_helpers(skeleton: Skeleton, smap: SkeletonMap, rest: dict, lengths: dict, add_spec,
+                         constraint_jobs: list, info: dict, armature_object: Object):
+    """
+    Makes the rotation helper bones of the limb joints follow the joints. Each helper gets a mechanism bone that
+    applies the rule of the joint (`JOINT_HELPER_RULES`), and the helper copies its rotation in its own orientation
+    (the rest orientations of the helpers differ from the joint's).
+    """
+    joints = []
+    for arm in smap.arms.values():
+        joints += [(arm.upper, 'upper', None, None), (arm.lower, 'lower', arm.upper, arm.hand),
+                   (arm.hand, 'hand', None, None)]
+    for leg in smap.legs.values():
+        joints += [(leg.upper, 'upper', None, None), (leg.lower, 'lower', leg.upper, leg.foot),
+                   (leg.foot, 'foot', None, None)]
+    items = []
+    for joint, role, upper, end in joints:
+        rule, value = JOINT_HELPER_RULES[role]
+        bend_axis = 0
+        if rule == 'bend' and upper is not None and end is not None:
+            # The bend axis is the normal of the plane of the limb (X if the limb is straight).
+            normal = (rest[joint].translation - rest[upper].translation).cross(
+                rest[end].translation - rest[joint].translation)
+            if normal.length > 1e-6 * max(lengths[joint], 1e-6) ** 2:
+                axis = _dominant_axis(_to_local(rest[joint], normal))
+                bend_axis = axis if axis != 1 else 0
+        for helper in _find_joint_helpers(skeleton, joint):
+            # The mechanism bone has the rest pose of the joint, or of the helper for a twist about the helper's axis.
+            mch = f'{MCH}{helper}'
+            matrix = (rest[helper] if rule == 'twist' else rest[joint]).copy()
+            add_spec(name=mch, matrix=matrix, length=lengths[joint], parent=skeleton.parent(joint), kind='MCH',
+                     collection=COLLECTION_MECHANISM, color=MECHANISM_COLOR, hide=True)
+            items.append({'joint': joint, 'mch': mch, 'helpers': [helper], 'rule': rule, 'value': value,
+                          'bend_axis': bend_axis})
+    info['joint_helpers'] = items
+
+    def joint_helpers_job(pose):
+        for item in items:
+            mch_bone = pose[item['mch']]
+            rule, value = item['rule'], item['value']
+            if rule == 'swing':
+                track = typing_cast(bpy.types.DampedTrackConstraint,
+                                    _new_constraint(mch_bone, 'DAMPED_TRACK', 'Joint Swing'))
+                track.target = armature_object
+                track.subtarget = item['joint']
+                track.head_tail = 1.0
+                track.track_axis = 'TRACK_Y'
+            elif rule in ('bend', 'twist'):
+                axis = 'XYZ'[item['bend_axis']] if rule == 'bend' else 'Y'
+                copy = typing_cast(bpy.types.CopyRotationConstraint,
+                                   _new_constraint(mch_bone, 'COPY_ROTATION', f'Joint {rule.title()}'))
+                copy.target = armature_object
+                copy.subtarget = item['joint']
+                copy.owner_space = 'LOCAL'
+                copy.target_space = 'LOCAL_OWNER_ORIENT' if rule == 'twist' else 'LOCAL'
+                # The twist comes first so that the bend doesn't pick it up.
+                copy.euler_order = {'X': 'YXZ', 'Z': 'YZX', 'Y': 'YZX'}[axis]
+                copy.use_x, copy.use_y, copy.use_z = (a == axis for a in 'XYZ')
+                copy.influence = value
+            for helper in item['helpers']:
+                copy = typing_cast(bpy.types.CopyRotationConstraint,
+                                   _new_constraint(pose[helper], 'COPY_ROTATION', 'Joint Helper'))
+                copy.target = armature_object
+                copy.subtarget = item['mch']
+                copy.owner_space = 'LOCAL'
+                copy.target_space = 'LOCAL_OWNER_ORIENT'
+                copy.mix_mode = 'REPLACE'
+        return None
+    constraint_jobs.append(('joint_helpers', joint_helpers_job))
+
+
+def _assign_joint_helper_collection(armature_data: Armature, info: dict, collections: dict):
+    """Moves the joint helper bones into their own (hidden) collection. The armature must be in edit mode."""
+    helper_collection = collections[COLLECTION_HELPERS]
+    helper_collection.is_visible = False
+    for item in info.get('joint_helpers', []):
+        for name in item['helpers']:
+            edit_bone = armature_data.edit_bones.get(name)
+            if edit_bone is None:
+                continue
+            for collection in list(edit_bone.collections):
+                collection.unassign(edit_bone)
+            helper_collection.assign(edit_bone)
+
+
+def _upgrade_joint_helpers(context: Context, armature_object: Object, info: dict):
+    """Version 4: the rotation helper bones of the limb joints follow the joints."""
+    assert context.view_layer and armature_object.pose
+    armature_data = typing_cast(Armature, armature_object.data)
+    skeleton = skeleton_from_bones([b for b in armature_data.bones if not is_rig_bone(b)])
+    smap = analyze_skeleton(skeleton)
+    if smap.root is None:
+        return
+    rest = {b.name: b.matrix_local.copy() for b in armature_data.bones}
+    lengths = {b.name: b.length for b in armature_data.bones}
+    specs: list[_BoneSpec] = []
+    jobs: list = []
+
+    def add_spec(**kwargs) -> _BoneSpec:
+        spec = _BoneSpec(**kwargs)
+        specs.append(spec)
+        return spec
+
+    _build_joint_helpers(skeleton, smap, rest, lengths, add_spec, jobs, info, armature_object)
+    previous_active = context.view_layer.objects.active
+    previous_mode = armature_object.mode
+    context.view_layer.objects.active = armature_object
+    bpy.ops.object.mode_set(mode='EDIT')
+    collections = {name: armature_data.collections.get(name) or armature_data.collections.new(name)
+                   for name in RIG_COLLECTIONS + (COLLECTION_HELPERS,)}
+    _create_spec_edit_bones(armature_data, specs, collections)
+    _assign_joint_helper_collection(armature_data, info, collections)
+    bpy.ops.object.mode_set(mode='POSE')
+    _apply_spec_pose_settings(armature_object, specs)
+    pose = armature_object.pose.bones
+    for _, job in jobs:
+        job(pose)
+    bpy.ops.object.mode_set(mode='OBJECT' if previous_mode == 'EDIT' else previous_mode)
+    context.view_layer.objects.active = previous_active
+
+
 def _ik_scale_axes(rest: dict[str, Matrix], upper: str, lower: str, end: str) -> list[int]:
     """
     The local scale axes that the lengths of an IK chain follow: the axis of the upper bone that its own length lies
@@ -761,6 +908,10 @@ def upgrade_rig(armature_object: Object, context: Context | None = None) -> bool
         _upgrade_hand_and_foot_controls(context, armature_object, info)
         info['version'] = 3
         changed = True
+    if info.get('version', 1) < 4 and context is not None:
+        _upgrade_joint_helpers(context, armature_object, info)
+        info['version'] = 4
+        changed = True
     if changed:
         armature_object.data[RIG_INFO_PROPERTY] = json.dumps(info)
         armature_object.update_tag()
@@ -822,6 +973,10 @@ def remove_rig(context: Context, armature_object: Object):
         collection = armature_data.collections.get(name)
         if collection is not None:
             armature_data.collections.remove(collection)
+    # The joint helpers stop following the joints, so show them again.
+    helper_collection = armature_data.collections.get(COLLECTION_HELPERS)
+    if helper_collection is not None:
+        helper_collection.is_visible = True
 
     for prop in rig_properties:
         if prop in armature_object:
@@ -1109,6 +1264,11 @@ def build_rig(context: Context, armature_object: Object, options: RigOptions) ->
         _build_face(skeleton, smap, rest, lengths, face_unit, add_spec, constraint_jobs, info, armature_object)
 
     # ------------------------------------------------------------------------------------------------------------
+    # Joint helpers
+    # ------------------------------------------------------------------------------------------------------------
+    _build_joint_helpers(skeleton, smap, rest, lengths, add_spec, constraint_jobs, info, armature_object)
+
+    # ------------------------------------------------------------------------------------------------------------
     # Create the bones.
     # ------------------------------------------------------------------------------------------------------------
     previous_active = context.view_layer.objects.active
@@ -1146,6 +1306,7 @@ def build_rig(context: Context, armature_object: Object, options: RigOptions) ->
             collections[COLLECTION_FACE].assign(edit_bone)
         else:
             collections[COLLECTION_BODY].assign(edit_bone)
+    _assign_joint_helper_collection(armature_data, info, collections)
 
     bpy.ops.object.mode_set(mode='POSE')
 
