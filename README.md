@@ -7,8 +7,19 @@ This Blender addon allows you to import and export meshes and animations to and 
 
 This software is licensed under the [GPLv3](https://www.gnu.org/licenses/gpl-3.0.html) license.
 
+> **About this fork.** This is a fork of [DarklightGames/io_scene_psk_psa](https://github.com/DarklightGames/io_scene_psk_psa)
+> by Colin Basnett, made while modding *MY HERO ACADEMIA: All's Justice* and *Ultra Rumble*. It adds **Fix Bone Tails**,
+> the **Animate Ready** control rig (IK/FK, foot roll, finger, eye and face controls), **Auto Setup Textures** for
+> FModel and UE Viewer exports, faster PSA import, and scale keys on PSA export. Everything else is the original
+> addon. Please report problems with these additions here, not to the original project.
+
 # Installation
-For Blender 4.2 and higher, download the latest version from the [Blender Extensions](https://extensions.blender.org/add-ons/io-scene-psk-psa/) platform.
+This fork is not on the Blender Extensions platform. Download the repository as a zip, zip the `io_scene_psk_psa`
+folder on its own, then in Blender use `Edit` > `Preferences` > `Get Extensions` > the drop-down menu >
+`Install from Disk...` and pick that zip. It uses the same id as the original addon, so it replaces it; disable or
+remove the original first if you have it. Needs Blender 4.5 or newer.
+
+The original addon: for Blender 4.2 and higher, download the latest version from the [Blender Extensions](https://extensions.blender.org/add-ons/io-scene-psk-psa/) platform.
 
 For Blender 4.1 and lower, see [Legacy Compatibility](#legacy-compatibility).
 
@@ -83,6 +94,17 @@ It is highly recommended to use the provided [Collection Exporters](https://docs
 3. Enter the file name and click `Export`.
 
 > Note that in order to see the imported actions applied to your armature, you must use the [Dope Sheet](https://docs.blender.org/manual/en/latest/editors/dope_sheet/introduction.html) or [Nonlinear Animation](https://docs.blender.org/manual/en/latest/editors/nla/introduction.html) editors.
+
+## Using it with All's Justice and Ultra Rumble exports
+These games are Unreal Engine 5 games. Export from them with [FModel](https://fmodel.app/):
+* **Meshes:** export the skeletal mesh as PSK, with textures as PNG and the material `.json` files. Keep FModel's
+  folder layout (`.../Model/<costume>/Mesh/`, `.../Mat/`, `.../Tex/`) so **Auto Setup Textures** finds every material;
+  costume colour variants (`..._CV` materials) borrow the closest material that has a file.
+* **Animations:** export as PSA, then import them onto the armature from the PSK.
+* **Animating:** import the PSK with **Animate Ready** on, animate the controls, then export a PSA. The controls are
+  never exported, and **Fix Bone Tails** keeps the exported bone orientations identical to the game's, so the
+  animation can go back into the game unchanged. If the animation scales bones, the export writes scale keys (the
+  **Scale Keys** option, on by default).
 
 # FAQ
 
